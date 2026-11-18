@@ -40,8 +40,10 @@ enum Item {
     NoMatch,
     Row(usize),
     Line(usize),
-    UpdatesHeader,
-    Update(usize),
+    /// A day heading on the Updates page, then that day's series.
+    Day(usize),
+    /// A row of drops from one day, as a range into `drops`.
+    Drops(usize, usize),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -70,6 +72,14 @@ impl Sort {
     const ALL: [Sort; 3] = [Sort::LastRead, Sort::MostNew, Sort::Title];
 }
 
+/// One series' chapters that came out on the same day.
+struct Drop {
+    at: i64,
+    day: String,
+    series: usize,
+    chapters: Vec<usize>,
+}
+
 pub struct Library {
     /// The same data drives the Updates page, so new chapters are only checked once.
     pub updates_page: bool,
@@ -90,6 +100,8 @@ pub struct Library {
     series: Vec<Series>,
     library_len: usize,
     updates: Vec<(usize, usize)>,
+    drops: Vec<Drop>,
+    drop_w: f32,
     checking: Option<(usize, usize)>,
     checked: bool,
     filter: Filter,
@@ -138,6 +150,8 @@ impl Library {
             series: vec![],
             library_len: 0,
             updates: vec![],
+            drops: vec![],
+            drop_w: 0.,
             checking: None,
             checked: false,
             filter: Filter::All,
@@ -258,16 +272,23 @@ impl Library {
                 let cards: Vec<AnyElement> = (start..end).map(|i| self.card(self.shown[i], cx)).collect();
                 div().flex().gap(u(GAP)).px(u(PAD)).pt(u(24.)).children(cards).into_any_element()
             }
-            Some(Item::UpdatesHeader) => div()
-                .pt(u(14.))
-                .child(mono_row(
-                    ["WHEN", "SERIES", "CHAPTER", "SOURCE", "STATUS"].map(|t| div().child(t).into_any_element()),
-                    FAINT,
-                    11.,
-                    LINE,
-                ))
-                .into_any_element(),
-            Some(Item::Update(row)) => self.update_row(row, cx),
+            Some(Item::Day(i)) => {
+                let day = &self.drops[i].day;
+                let now = now_ms();
+                let label = if *day == crate::manga::ymd(now) {
+                    "TODAY".to_string()
+                } else if *day == crate::manga::ymd(now - 86_400_000) {
+                    "YESTERDAY".to_string()
+                } else {
+                    day_label(self.drops[i].at)
+                };
+                div().px(u(PAD)).pt(u(28.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child(label).into_any_element()
+            }
+            Some(Item::Drops(start, end)) => {
+                let w = self.drop_w;
+                let cards: Vec<AnyElement> = (start..end).map(|i| div().w(u(w)).flex_none().child(self.drop_card(i, cx)).into_any_element()).collect();
+                div().w_full().px(u(PAD)).pb(u(12.)).flex().gap(u(12.)).children(cards).into_any_element()
+            }
             None => div().into_any_element(),
         }
     }
@@ -512,58 +533,92 @@ impl Library {
             .into_any_element()
     }
 
-    fn update_row(&mut self, row: usize, cx: &mut Context<Self>) -> AnyElement {
-        let (si, ci) = self.updates[row];
-        let s = &self.series[si];
-        let ch = &s.chapters[ci];
-        let read = s.reading_index().is_some_and(|r| ci >= r);
-        let (status, color) = if read { ("read", MUTED) } else { ("new", ACCENT_TEXT) };
-        let when = ago(ch["dateUpload"].as_i64().unwrap_or(0), now_ms());
-        let title = s.title().to_string();
+    fn drop_card(&mut self, i: usize, cx: &mut Context<Self>) -> AnyElement {
+        let si = self.drops[i].series;
+        let chapters = self.drops[i].chapters.clone();
         let image = self.cover_of(si, cx);
         let s = &self.series[si];
-        let ch = &s.chapters[ci];
-        let cells = [
-            div().font_family(MONO).text_size(u(12.5)).text_color(rgb(MUTED)).child(when),
+        let reading = s.reading_index();
+        let is_new = |ci: usize| !reading.is_some_and(|r| ci >= r);
+        let fresh: Vec<usize> = chapters.iter().copied().filter(|&ci| is_new(ci)).collect();
+        // Start from the oldest new one, so nothing gets skipped.
+        let open = fresh.iter().max().or(chapters.iter().max()).copied();
+        let shown = 3;
+        let lines: Vec<AnyElement> = chapters
+            .iter()
+            .take(shown)
+            .map(|&ci| {
+                let new = is_new(ci);
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(u(8.))
+                    .text_size(u(13.5))
+                    .text_color(rgb(if new { crate::BODY } else { FAINT }))
+                    .child(div().flex_none().size(u(5.)).rounded(u(3.)).bg(rgb(if new { ACCENT } else { LINE })))
+                    .child(div().min_w_0().truncate().child(s.chapters[ci]["name"].as_str().unwrap_or("Chapter").to_string()))
+                    .into_any_element()
+            })
+            .collect();
+        let more = chapters.len().saturating_sub(shown);
+        let badge = if fresh.is_empty() {
+            div().font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("READ")
+        } else {
             div()
+                .h(u(22.))
+                .px(u(9.))
+                .rounded(u(11.))
                 .flex()
                 .items_center()
-                .gap_3()
-                .child(cover(image, "", 30., 30. * CARD_H / CARD_W, 0))
-                .child(div().min_w_0().font_weight(FontWeight::SEMIBOLD).truncate().child(title)),
-            div().text_color(rgb(0xC9C1B3)).truncate().child(ch["name"].as_str().unwrap_or("Chapter").to_string()),
-            div().text_color(rgb(MUTED)).truncate().child(s.source_name.clone()),
-            div().font_family(MONO).text_size(u(12.)).text_color(rgb(color)).child(status),
-        ]
-        .map(IntoElement::into_any_element);
-        let row = div()
-            .id(("update", row))
+                .bg(rgb(ACCENT))
+                .font_family(MONO)
+                .text_size(u(11.))
+                .text_color(rgb(crate::BG))
+                .child(format!("{} NEW", fresh.len()))
+        };
+        let card = div()
+            .id(("drop", i))
+            .flex()
+            .gap(u(16.))
+            .p(u(12.))
+            .rounded(u(12.))
+            .border_1()
+            .border_color(rgb(RULE))
             .cursor_pointer()
             .hover(|d| d.bg(rgb(SURFACE)))
-            .child(mono_row(cells, TEXT, 14., RULE).mx_0().py(u(10.)))
-            .on_click(cx.listener(move |this, _, _, cx| this.resume(si, Some(ci), cx)));
-        div().w_full().px(u(PAD)).child(row).into_any_element()
+            .when(fresh.is_empty(), |d| d.opacity(0.6))
+            .child(div().flex_none().child(cover(image, "", 52., 74., 0)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(u(5.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap(u(10.))
+                            .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(s.title().to_string()))
+                            .child(div().flex_none().text_size(u(12.)).text_color(rgb(FAINT)).child(s.source_name.clone())),
+                    )
+                    .children(lines)
+                    .when(more > 0, |d| d.child(div().pl(u(13.)).text_size(u(12.5)).text_color(rgb(FAINT)).child(format!("+{more} more")))),
+            )
+            .child(div().flex_none().child(badge))
+            .when_some(open, |d, ci| d.on_click(cx.listener(move |this, _, _, cx| this.resume(si, Some(ci), cx))));
+        card.h_full().into_any_element()
     }
 }
 
-fn mono_row(cells: [AnyElement; 5], color: u32, size: f32, border: u32) -> gpui::Div {
-    let [when, series, chapter, source, status] = cells;
-    div()
-        .mx(u(PAD))
-        .py(u(8.))
-        .flex()
-        .items_center()
-        .gap_4()
-        .border_b_1()
-        .border_color(rgb(border))
-        .text_color(rgb(color))
-        .text_size(u(size))
-        .when(size < 12., |d| d.font_family(MONO))
-        .child(div().w(u(110.)).flex_none().child(when))
-        .child(div().flex_1().min_w_0().child(series))
-        .child(div().flex_1().min_w_0().child(chapter))
-        .child(div().w(u(160.)).flex_none().min_w_0().child(source))
-        .child(div().w(u(80.)).flex_none().flex().justify_end().child(status))
+/// "SUN 16 NOV" for a date in milliseconds.
+fn day_label(ms: i64) -> String {
+    const DAYS: [&str; 7] = ["THU", "FRI", "SAT", "SUN", "MON", "TUE", "WED"];
+    const MONTHS: [&str; 12] = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+    let ymd = crate::manga::ymd(ms);
+    let (month, day) = (ymd[5..7].parse::<usize>().unwrap_or(1), ymd[8..10].trim_start_matches('0').to_string());
+    format!("{} {day} {}", DAYS[ms.div_euclid(86_400_000).rem_euclid(7) as usize], MONTHS[month - 1])
 }
 
 /// A cover with a READING or CAUGHT UP label and a thin progress line along the bottom.
@@ -647,7 +702,20 @@ impl Render for Library {
             })
             .collect();
         updates.sort_by_key(|u| -u.2);
-        self.updates = updates.into_iter().take(UPDATES).map(|(s, c, _)| (s, c)).collect();
+        let updates: Vec<(usize, usize, i64)> = updates.into_iter().take(UPDATES).collect();
+        self.updates = updates.iter().map(|&(s, c, _)| (s, c)).collect();
+        // UTC days. Switch to local time if sources start giving hours.
+        let mut drops: Vec<Drop> = vec![];
+        for (si, ci, at) in updates {
+            let day = crate::manga::ymd(at);
+            match drops.iter_mut().find(|d| d.day == day && d.series == si) {
+                Some(d) => d.chapters.push(ci),
+                None => drops.push(Drop { at, day, series: si, chapters: vec![ci] }),
+            }
+        }
+        // Chapter lists run newest first, so this puts each day's newest chapter on top.
+        drops.iter_mut().for_each(|d| d.chapters.sort());
+        self.drops = drops;
         // Something read from Browse without saving still belongs on the shelf.
         self.shelf = reading
             .into_iter()
@@ -662,11 +730,23 @@ impl Render for Library {
 
         let mut items = vec![Item::Heading];
         if self.updates_page {
-            if self.updates.is_empty() {
+            if self.drops.is_empty() {
                 items.push(Item::NoMatch);
-            } else {
-                items.push(Item::UpdatesHeader);
-                items.extend((0..self.updates.len()).map(Item::Update));
+            }
+            let avail = self.width / crate::zoom() - 2. * PAD;
+            let cols = ((avail + 12.) / 472.).floor().max(1.) as usize;
+            self.drop_w = (avail - 12. * (cols - 1) as f32) / cols as f32;
+            let mut start = 0;
+            while start < self.drops.len() {
+                let day = &self.drops[start].day;
+                let end = start + self.drops[start..].iter().take_while(|d| &d.day == day).count();
+                items.push(Item::Day(start));
+                let mut row = start;
+                while row < end {
+                    items.push(Item::Drops(row, (row + cols).min(end)));
+                    row += cols;
+                }
+                start = end;
             }
         } else {
             if !self.shelf.is_empty() {
@@ -707,5 +787,15 @@ impl Render for Library {
         div().size_full().pb(u(24.)).child(
             list(self.list.clone(), move |ix, _window, cx| this.update(cx, |this, cx| this.item(ix, cx))).size_full(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn day_labels_name_the_weekday() {
+        assert_eq!(super::day_label(0), "THU 1 JAN");
+        assert_eq!(super::day_label(1_704_067_200_000), "MON 1 JAN"); // 2024-01-01
+        assert_eq!(super::day_label(1_731_715_200_000), "SAT 16 NOV"); // 2024-11-16
     }
 }
