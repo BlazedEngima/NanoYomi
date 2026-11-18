@@ -17,6 +17,7 @@ pub struct Settings {
     sync_host: Entity<TextInput>,
     sync_key: Entity<TextInput>,
     solver: Entity<TextInput>,
+    new_category: Entity<TextInput>,
 }
 
 impl Settings {
@@ -47,7 +48,19 @@ impl Settings {
             this.store.update(cx, |s, cx| s.set_solver_url(&url, cx));
         })
         .detach();
-        Settings { store, covers_cleared: false, pages_cleared: false, sync_host, sync_key, solver }
+        let new_category = plain("New category name", "", cx);
+        cx.subscribe(&new_category, |this, _, _: &InputEvent, cx| this.add_category(cx)).detach();
+        Settings { store, covers_cleared: false, pages_cleared: false, sync_host, sync_key, solver, new_category }
+    }
+
+    fn add_category(&mut self, cx: &mut Context<Self>) {
+        let name = self.new_category.read(cx).text.clone();
+        self.store.update(cx, |s, cx| s.add_category(&name, cx));
+        self.new_category.update(cx, |i, cx| {
+            i.text.clear();
+            cx.notify();
+        });
+        crate::sync::run(self.store.clone(), cx);
     }
 
     fn sync_now(&mut self, cx: &mut Context<Self>) {
@@ -121,6 +134,39 @@ impl Render for Settings {
             )
             .child(div().flex_none().flex().gap(u(6.)).children(caps))
             .child(clear_pages);
+        let categories = self.store.read(cx).categories();
+        let category_rows = categories.into_iter().map(|c| {
+            let order = c.order;
+            div()
+                .py(u(10.))
+                .flex()
+                .items_center()
+                .gap_4()
+                .border_b_1()
+                .border_color(rgb(RULE))
+                .child(div().flex_1().min_w_0().truncate().child(c.name.clone()))
+                .child(small_button(("delete-category", order as usize), "Delete", false).on_click(cx.listener(move |this, _, _, cx| {
+                    this.store.update(cx, |s, cx| s.remove_category(order, cx));
+                    crate::sync::run(this.store.clone(), cx);
+                })))
+        });
+        let categories = div()
+            .w_full()
+            .border_t_1()
+            .border_color(rgb(RULE))
+            .children(category_rows)
+            .child(
+                div()
+                    .py(u(12.))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().flex_1().max_w(u(420.)).child(self.new_category.clone()))
+                    .child(small_button("add-category", "Add", true).on_click(cx.listener(|this, _, _, cx| this.add_category(cx)))),
+            )
+            .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(
+                "Shelves for your library, shown as tabs above it. Put a series in one from its page. They sync with your phone through SyncYomi.",
+            ));
         let auto = self.store.read(cx).auto_download();
         let auto_chip = |id: &'static str, label: &'static str, value: bool, store: Entity<Store>| {
             small_button(id, label, auto == value).on_click(move |_, _, cx| store.update(cx, |s, cx| s.set_auto_download(value, cx)))
@@ -275,6 +321,8 @@ impl Render for Settings {
             .child(heading("Settings", ""))
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("READING"))
             .child(reading)
+            .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("CATEGORIES"))
+            .child(categories)
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("DOWNLOADS"))
             .child(downloads)
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("SYNC"))

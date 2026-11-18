@@ -110,6 +110,10 @@ pub struct Library {
     as_list: bool,
     relayout: bool,
     filter_switch: Segmented,
+    /// Categories, as tabs. `category` is the chosen one's order, or None for all.
+    shelves: Vec<crate::store::Category>,
+    category: Option<i64>,
+    shelf_switch: Segmented,
     layout_switch: Segmented,
     sort_open: bool,
     sort_closed: Option<std::time::Instant>,
@@ -141,6 +145,9 @@ impl Library {
         let filter_switch = Segmented::new(&["All", "New chapters", "Caught up"], 0);
         let layout_switch = Segmented::new(&["Grid", "List"], usize::from(as_list));
         Library {
+            shelves: vec![],
+            category: None,
+            shelf_switch: Segmented::new(&["All"], 0),
             filter_switch,
             layout_switch,
             updates_page: false,
@@ -389,7 +396,18 @@ impl Library {
             .flex_wrap()
             .items_center()
             .gap(u(10.))
-            .child(Self::section_title("EVERYTHING"))
+            .child(if self.shelves.is_empty() {
+                Self::section_title("EVERYTHING").into_any_element()
+            } else {
+                self.shelf_switch
+                    .render("shelf", cx.listener(|this, i: &usize, _, cx| {
+                        this.shelf_switch.pick(*i);
+                        this.category = if *i == 0 { None } else { this.shelves.get(*i - 1).map(|c| c.order) };
+                        this.relayout = true;
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
             .child(div().ml_auto().flex().flex_wrap().gap(u(10.)).child(self.filter_switch.render("filter", cx.listener(|this, i: &usize, _, cx| {
                 this.filter_switch.pick(*i);
                 this.filter = [Filter::All, Filter::New, Filter::Done][*i];
@@ -700,7 +718,15 @@ impl Render for Library {
             s
         }).collect();
 
+        self.shelves = store.categories();
+        if self.category.is_some_and(|o| !self.shelves.iter().any(|c| c.order == o)) {
+            self.category = None;
+        }
+        let labels: Vec<String> = std::iter::once("All".to_string()).chain(self.shelves.iter().map(|c| c.name.clone())).collect();
+        let at = self.category.and_then(|o| self.shelves.iter().position(|c| c.order == o)).map_or(0, |p| p + 1);
+        self.shelf_switch.set(&labels.iter().map(String::as_str).collect::<Vec<_>>(), at);
         let mut shown: Vec<usize> = (0..self.library_len)
+            .filter(|&i| self.category.is_none_or(|o| self.series[i].categories.contains(&o)))
             .filter(|&i| match self.filter {
                 Filter::All => true,
                 Filter::New => self.series[i].unread() > 0,

@@ -61,6 +61,9 @@ pub struct MangaView {
     bookmarks: std::collections::BTreeSet<String>,
     /// Folder names of the chapters on disk.
     downloaded: std::collections::HashSet<String>,
+    /// The categories menu, and when it last closed so the click that closed it doesn't reopen it.
+    cat_menu: bool,
+    cat_closed: Option<std::time::Instant>,
     /// The chapter whose actions menu is open, and where.
     row_menu: Option<(usize, gpui::Point<gpui::Pixels>)>,
     _subs: Vec<Subscription>,
@@ -137,6 +140,8 @@ impl MangaView {
             read: vec![],
             bookmarks: Default::default(),
             row_menu: None,
+            cat_menu: false,
+            cat_closed: None,
             downloaded,
             status: status.into(),
             _subs: subs,
@@ -221,6 +226,81 @@ impl MangaView {
 
     fn url_of(&self, i: usize) -> String {
         self.visible[i]["url"].as_str().unwrap_or_default().to_string()
+    }
+
+    fn categories_button(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let all = self.store.read(cx).categories();
+        let mine = self.store.read(cx).get(&self.source.id, self.url()).map(|s| s.categories.clone()).unwrap_or_default();
+        let names: Vec<String> = all.iter().filter(|c| mine.contains(&c.order)).map(|c| c.name.clone()).collect();
+        let label = match names.len() {
+            0 => "No category".to_string(),
+            1 => names[0].clone(),
+            n => format!("{} + {}", names[0], n - 1),
+        };
+        let button = pill("categories", label, false).on_click(cx.listener(|this, _, _, cx| {
+            let just_closed = this.cat_closed.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(300));
+            this.cat_menu = !this.cat_menu && !just_closed;
+            cx.notify();
+        }));
+        let rows = all.into_iter().map(|c| {
+            let on = mine.contains(&c.order);
+            let order = c.order;
+            div()
+                .id(("category", order as usize))
+                .px(u(12.))
+                .py(u(8.))
+                .flex()
+                .items_center()
+                .gap(u(10.))
+                .rounded(u(6.))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(crate::HOVER)))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(u(16.))
+                        .rounded(u(4.))
+                        .border_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(on, |d| d.bg(rgb(crate::ACCENT)).border_color(rgb(crate::ACCENT)).child(crate::check(12., crate::BG)))
+                        .when(!on, |d| d.border_color(rgb(LINE))),
+                )
+                .child(div().flex_1().min_w_0().truncate().text_size(u(13.)).child(c.name))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.edit(cx, |s| {
+                        if let Some(i) = s.categories.iter().position(|o| *o == order) {
+                            s.categories.remove(i);
+                        } else {
+                            s.categories.push(order);
+                        }
+                    })
+                }))
+        });
+        let empty = self.store.read(cx).categories().is_empty();
+        let panel = div()
+            .id("categories-menu")
+            .occlude()
+            .w(u(240.))
+            .p(u(5.))
+            .rounded(u(10.))
+            .border_1()
+            .border_color(rgb(LINE))
+            .bg(rgb(SURFACE))
+            .shadow_lg()
+            .children(rows)
+            .when(empty, |d| d.child(div().p(u(10.)).text_size(u(13.)).text_color(rgb(MUTED)).child("No categories yet. Add them in Settings.")))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.cat_menu = false;
+                this.cat_closed = Some(std::time::Instant::now());
+                cx.notify();
+            }));
+        div()
+            .relative()
+            .child(button)
+            .when(self.cat_menu, |d| d.child(gpui::deferred(panel.absolute().top(u(50.)).left_0()).with_priority(2)))
+            .into_any_element()
     }
 
     /// Unread chapters that aren't on disk or in the queue, oldest first so they finish in reading order.
@@ -678,6 +758,7 @@ impl MangaView {
                                     .when(in_library, |d| d.gap_2().child(crate::check(16., TEXT)).flex_row_reverse())
                                     .on_click(cx.listener(|this, _, _, cx| this.toggle_library(cx))),
                             )
+                            .when(in_library, |d| d.child(self.categories_button(cx)))
                             .when(installed && saved.is_some(), |d| d.child(pill("migrate", "Migrate", false).on_click(cx.listener(|_, _, _, cx| cx.emit(MangaEvent::Migrate))))),
             )
             .when_some(self.text("description"), |d, t| {

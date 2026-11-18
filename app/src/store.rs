@@ -29,6 +29,22 @@ pub struct Series {
     /// Bookmarked chapters, by url.
     #[serde(default)]
     pub bookmarks: std::collections::BTreeSet<String>,
+    /// The categories it's in, by their `order`, as Mihon's backup does.
+    #[serde(default)]
+    pub categories: Vec<i64>,
+}
+
+/// A library shelf. Mihon's backup fields, so phones and Nano agree on them through sync.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Category {
+    pub name: String,
+    pub order: i64,
+    #[serde(default)]
+    pub flags: i64,
+    #[serde(default)]
+    pub uid: i64,
+    #[serde(default)]
+    pub version: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -55,6 +71,7 @@ impl Series {
             sync: None,
             marks: Default::default(),
             bookmarks: Default::default(),
+            categories: vec![],
         }
     }
 
@@ -204,6 +221,14 @@ struct Data {
     repos: Vec<crate::extensions::Repo>,
     #[serde(default)]
     auto_download: bool,
+    #[serde(default)]
+    categories: Vec<Category>,
+    /// Categories were added, renamed or removed here since the last sync.
+    #[serde(default)]
+    categories_changed: bool,
+    /// Names deleted here, so a sync doesn't bring them back. Mihon's backup has no way to say "deleted".
+    #[serde(default)]
+    deleted_categories: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -354,6 +379,85 @@ impl Store {
         self.save_soon(cx);
     }
 
+    /// In display order.
+    pub fn categories(&self) -> Vec<Category> {
+        let mut list = self.data.categories.clone();
+        list.sort_by_key(|c| c.order);
+        list
+    }
+
+    pub fn add_category(&mut self, name: &str, cx: &mut Context<Self>) {
+        let name = name.trim();
+        if name.is_empty() || self.data.categories.iter().any(|c| c.name.eq_ignore_ascii_case(name)) {
+            return;
+        }
+        let order = self.data.categories.iter().map(|c| c.order).max().map_or(1, |o| o + 1);
+        // Mihon gives each category a random uid for sync to match on.
+        let uid = (now_ms() ^ (std::process::id() as i64) << 20).abs();
+        self.data.categories.push(Category { name: name.into(), order, flags: 0, uid, version: 1 });
+        self.data.categories_changed = true;
+        self.save_soon(cx);
+        cx.notify();
+    }
+
+    pub fn remove_category(&mut self, order: i64, cx: &mut Context<Self>) {
+        if let Some(c) = self.data.categories.iter().find(|c| c.order == order) {
+            self.data.deleted_categories.push(c.name.to_lowercase());
+        }
+        self.data.categories.retain(|c| c.order != order);
+        for s in &mut self.data.series {
+            s.categories.retain(|o| *o != order);
+        }
+        self.data.categories_changed = true;
+        self.save_soon(cx);
+        cx.notify();
+    }
+
+    fn renumber(&mut self, i: usize, to: i64) {
+        let from = self.data.categories[i].order;
+        self.data.categories[i].order = to;
+        for s in &mut self.data.series {
+            for o in s.categories.iter_mut().filter(|o| **o == from) {
+                *o = to;
+            }
+        }
+        self.data.categories_changed = true;
+    }
+
+    pub(crate) fn categories_changed(&self) -> bool {
+        self.data.categories_changed
+    }
+
+    /// Takes the server's categories, matched by name. Its order numbers win, since series point at them.
+    pub(crate) fn take_categories(&mut self, server: Vec<Category>, sent: bool) {
+        for c in server {
+            if self.data.deleted_categories.contains(&c.name.to_lowercase()) {
+                continue;
+            }
+            // Another local category on that number moves out of the way first, taking its series along.
+            if let Some(i) = self.data.categories.iter().position(|l| l.order == c.order && !l.name.eq_ignore_ascii_case(&c.name)) {
+                let free = self.data.categories.iter().map(|l| l.order).max().unwrap_or(0).max(c.order) + 1;
+                self.renumber(i, free);
+            }
+            match self.data.categories.iter_mut().find(|l| l.name.eq_ignore_ascii_case(&c.name)) {
+                Some(local) if local.order != c.order => {
+                    let old = local.order;
+                    *local = c.clone();
+                    for s in &mut self.data.series {
+                        for o in s.categories.iter_mut().filter(|o| **o == old) {
+                            *o = c.order;
+                        }
+                    }
+                }
+                Some(local) => *local = c,
+                None => self.data.categories.push(c),
+            }
+        }
+        if sent {
+            self.data.categories_changed = false;
+        }
+    }
+
     pub fn auto_download(&self) -> bool {
         self.data.auto_download
     }
@@ -491,6 +595,25 @@ mod tests {
         assert!(!s.caught_up());
         s.progress = Some(Progress { chapter_url: "/c4".into(), chapter_name: "".into(), page: 1, pages: 2, at: 0 });
         assert!(s.caught_up());
+    }
+
+    #[test]
+    fn server_categories_take_over_their_numbers() {
+        let mut store = Store::load(std::env::temp_dir().join("nano-no-such-library.json"));
+        let cat = |name: &str, order: i64| Category { name: name.into(), order, flags: 0, uid: order, version: 1 };
+        store.data.categories = vec![cat("Reading", 1), cat("Plan", 2)];
+        let mut s = Series::new("1".into(), "S".into(), json!({ "url": "/m" }));
+        s.categories = vec![2]; // in Plan
+        store.data.series.push(s);
+        // The phone has Reading at 2 and a new Done at 3.
+        store.take_categories(vec![cat("reading", 2), cat("Done", 3)], false);
+        let by = |n: &str| store.data.categories.iter().find(|c| c.name.eq_ignore_ascii_case(n)).map(|c| c.order);
+        assert_eq!(by("Reading"), Some(2));
+        let plan = by("Plan").unwrap();
+        assert!(plan != 2 && plan != 3, "Plan moved out of the way");
+        assert_eq!(store.data.series[0].categories, [plan], "its series moved with it");
+        assert_eq!(by("Done"), Some(3));
+        assert!(store.categories_changed(), "the move gets sent");
     }
 
     #[test]

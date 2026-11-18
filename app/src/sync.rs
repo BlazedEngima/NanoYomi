@@ -31,6 +31,8 @@ struct Snapshot {
     marks: std::collections::BTreeMap<String, bool>,
     #[serde(default)]
     bookmarks: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    categories: Vec<i64>,
 }
 
 impl Snapshot {
@@ -40,6 +42,7 @@ impl Snapshot {
             progress: s.progress.as_ref().map(|p| (p.chapter_url.clone(), p.page, p.at)),
             marks: s.marks.clone(),
             bookmarks: s.bookmarks.clone(),
+            categories: s.categories.clone(),
         }
     }
 }
@@ -180,6 +183,25 @@ impl Msg {
         self.0.iter().filter(move |(k, _)| *k == n).filter_map(|(_, v)| if let Val::Bytes(b) = v { Some(b.as_slice()) } else { None })
     }
 
+    /// A repeated number field, whether written one per entry (Kotlin) or packed (proto3, as the Go server does).
+    fn ints(&self, n: u32) -> Vec<i64> {
+        let mut out = vec![];
+        for (k, v) in &self.0 {
+            match v {
+                Val::Varint(x) if *k == n => out.push(*x as i64),
+                Val::Bytes(b) if *k == n => {
+                    let mut i = 0;
+                    while i < b.len() {
+                        let Some(x) = varint(b, &mut i) else { break };
+                        out.push(x as i64);
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
     fn without(&self, ns: &[u32]) -> Msg {
         Msg(self.0.iter().filter(|(k, _)| !ns.contains(k)).cloned().collect())
     }
@@ -204,6 +226,13 @@ impl Msg {
 
 // Field numbers from SyncYomi's backup.proto.
 const B_MANGA: u32 = 1;
+const B_CATEGORIES: u32 = 2;
+const CAT_NAME: u32 = 1;
+const CAT_ORDER: u32 = 2;
+const CAT_FLAGS: u32 = 100;
+const CAT_VERSION: u32 = 601;
+const CAT_UID: u32 = 602;
+const M_CATEGORIES: u32 = 17;
 const B_SOURCES: u32 = 101;
 const M_SOURCE: u32 = 1;
 const M_URL: u32 = 2;
@@ -321,6 +350,15 @@ fn outgoing(s: &Series, raw: Option<Raw>, now: i64) -> (Msg, Raw) {
         m.set_int(M_VERSION, m.int(M_VERSION) + 1);
         m.set_int(M_MODIFIED, secs);
     }
+    if old.is_none_or(|o| o.categories != s.categories) {
+        let m = &mut raw.manga;
+        *m = m.without(&[M_CATEGORIES]);
+        for o in &s.categories {
+            m.0.push((M_CATEGORIES, Val::Varint(*o as u64)));
+        }
+        m.set_int(M_VERSION, m.int(M_VERSION) + 1);
+        m.set_int(M_MODIFIED, secs);
+    }
     let mut out = raw.manga.clone();
     // Same fields as Mihon's backup: read (4), bookmark (5) and last page read (6), each with a version bump.
     let visible = s.visible();
@@ -433,8 +471,10 @@ fn incoming(series: &mut Vec<Series>, m: &Msg, raw: Option<Raw>, source_names: &
             _ => {}
         }
     }
+    s.categories = m.ints(M_CATEGORIES);
     let meta = s.sync.get_or_insert_with(Meta::default);
     meta.sent.in_library = favorite;
+    meta.sent.categories = s.categories.clone();
     meta.sent.marks = s.marks.clone();
     meta.sent.bookmarks = s.bookmarks.clone();
     if let Some(p) = server {
@@ -450,7 +490,13 @@ fn decode(bytes: Vec<u8>, cursor: i64, full_requested: bool) -> Result<Reply, St
     let backup = Msg::parse(&gunzip(bytes)?).ok_or("The server's backup couldn't be read")?;
     let sources = backup.all(B_SOURCES).filter_map(Msg::parse).map(|s| ((s.int(2) as u64).to_string(), s.str(1))).collect();
     let mangas = backup.all(B_MANGA).filter_map(Msg::parse).collect();
-    Ok(Reply { mangas, sources, cursor, full_requested })
+    let categories = backup
+        .all(B_CATEGORIES)
+        .filter_map(Msg::parse)
+        .map(|c| crate::store::Category { name: c.str(CAT_NAME), order: c.int(CAT_ORDER), flags: c.int(CAT_FLAGS), uid: c.int(CAT_UID), version: c.int(CAT_VERSION) })
+        .filter(|c| !c.name.is_empty())
+        .collect();
+    Ok(Reply { mangas, categories, sources, cursor, full_requested })
 }
 
 fn gunzip(b: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -464,6 +510,7 @@ fn gunzip(b: Vec<u8>) -> Result<Vec<u8>, String> {
 
 struct Reply {
     mangas: Vec<Msg>,
+    categories: Vec<crate::store::Category>,
     sources: HashMap<String, String>,
     cursor: i64,
     full_requested: bool,
@@ -488,7 +535,7 @@ fn snapshot(cfg: &Config, cursor: i64) -> Result<Option<Reply>, String> {
         .call();
     // A fresh server 404s until the first upload. Treat that as an empty library.
     let mut res = match res {
-        Err(ureq::Error::StatusCode(404)) => return Ok(Some(Reply { mangas: vec![], sources: HashMap::new(), cursor: 0, full_requested: false })),
+        Err(ureq::Error::StatusCode(404)) => return Ok(Some(Reply { mangas: vec![], categories: vec![], sources: HashMap::new(), cursor: 0, full_requested: false })),
         r => r.map_err(status_error)?,
     };
     if res.status() == 304 {
@@ -540,10 +587,11 @@ pub fn run(store: Entity<Store>, cx: &mut App) {
             if !store.read_with(cx, |s, _| s.sync_dirty()) {
                 return Ok(taken);
             }
-            let (body, sent) = store.read_with(cx, |s, _| s.sync_outgoing());
+            let (body, sent, categories) = store.read_with(cx, |s, _| s.sync_outgoing());
             let reply = cx.background_executor().spawn({ let cfg = cfg.clone(); async move { merge(&cfg, &body, false) } }).await?;
             Ok(store.update(cx, |s, cx| {
                 s.mark_synced(sent, cx);
+                s.take_categories(reply.categories.clone(), categories);
                 taken + s.apply_sync(&reply, if reply.full_requested { 0 } else { reply.cursor }, cx)
             }))
         }
@@ -562,14 +610,14 @@ pub struct Sent {
 
 impl Store {
     fn sync_dirty(&self) -> bool {
-        self.all_series().iter().any(dirty)
+        self.categories_changed() || self.all_series().iter().any(dirty)
     }
 
     fn sync_dir(&self) -> PathBuf {
         self.dir().join("sync")
     }
 
-    fn sync_outgoing(&self) -> (Msg, Vec<Sent>) {
+    fn sync_outgoing(&self) -> (Msg, Vec<Sent>, bool) {
         let (now, dir) = (now_ms(), self.sync_dir());
         let mut body = Msg::default();
         let mut sent = vec![];
@@ -587,7 +635,21 @@ impl Store {
             src.set_int(2, id.parse::<u64>().unwrap_or(0) as i64);
             body.push(B_SOURCES, &src);
         }
-        (body, sent)
+        let categories = self.categories_changed();
+        if categories {
+            for c in self.categories() {
+                let mut m = Msg::default();
+                m.set_str(CAT_NAME, &c.name);
+                m.set_int(CAT_ORDER, c.order);
+                if c.flags != 0 {
+                    m.set_int(CAT_FLAGS, c.flags);
+                }
+                m.set_int(CAT_VERSION, c.version + 1);
+                m.set_int(CAT_UID, c.uid);
+                body.push(B_CATEGORIES, &m);
+            }
+        }
+        (body, sent, categories)
     }
 
     pub fn mark_synced(&mut self, sent: Vec<Sent>, cx: &mut gpui::Context<Self>) {
@@ -605,6 +667,7 @@ impl Store {
     }
 
     fn apply_sync(&mut self, reply: &Reply, cursor: i64, cx: &mut gpui::Context<Self>) -> usize {
+        self.take_categories(reply.categories.clone(), false);
         let dir = self.sync_dir();
         let mut taken = 0;
         self.edit_series(cx, |series| {
@@ -725,6 +788,25 @@ mod tests {
         assert_eq!(by("/c2").and_then(|c| c.bool(C_BOOKMARK)), Some(false));
         // /c0 is before the current chapter, so it goes up as read too, as Mihon would show it.
         assert_eq!(by("/c0").and_then(|c| c.bool(C_READ)), Some(true));
+    }
+
+    #[test]
+    fn categories_read_packed_or_not_and_go_out_one_per_entry() {
+        let mut m = new_manga(&series());
+        m.0.push((M_CATEGORIES, Val::Varint(2)));
+        m.0.push((M_CATEGORIES, Val::Bytes(vec![5, 7]))); // packed, as a Go server writes it
+        assert_eq!(m.ints(M_CATEGORIES), [2, 5, 7]);
+
+        let mut list = vec![];
+        let (_, raw) = incoming(&mut list, &m, None, &HashMap::new()).unwrap();
+        let s = &mut list[0];
+        assert_eq!(s.categories, [2, 5, 7]);
+        assert!(!dirty(s));
+        s.categories = vec![3];
+        assert!(dirty(s));
+        let (out, _) = outgoing(s, Some(raw), 1000);
+        assert_eq!(out.ints(M_CATEGORIES), [3]);
+        assert!(out.0.iter().all(|(k, v)| *k != M_CATEGORIES || matches!(v, Val::Varint(_))), "Mihon's unpacked form");
     }
 
     #[test]
