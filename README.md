@@ -1,6 +1,6 @@
 | Platforms | Built with | Extensions |
 |-------|----------|----------|
-| ![macOS · Windows · Linux](https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux-desktop-e85a3c) | [![Rust + GPUI](https://img.shields.io/badge/Rust-GPUI-e85a3c)](https://www.gpui.rs) | [![Mihon extensions](https://img.shields.io/badge/Mihon-extensions-e85a3c)](https://github.com/keiyoushi/extensions) |
+| ![macOS · Windows · Linux](https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux-desktop-e85a3c) | [![Rust + GPUI](https://img.shields.io/badge/Rust-GPUI-e85a3c)](https://www.gpui.rs) | ![Mihon extensions](https://img.shields.io/badge/Mihon-extensions-e85a3c) |
 
 # 読 Nano
 
@@ -19,7 +19,7 @@ Nano is a free and open source manga reader for the desktop. It runs the same ex
 ## Features
 
 Features of Nano include:
-* Mihon/Tachiyomi extensions from the [keiyoushi](https://github.com/keiyoushi/extensions) repo, installed in the app. Each jar's signature is checked against keiyoushi's pinned key before it runs.
+* Mihon/Tachiyomi extensions from any repo you add, using the same address you'd give Mihon. Nano doesn't come with a repo. It remembers each repo's signing key when you add it and only runs jars signed with that key.
 * Every kind of search filter an extension offers: selects, checkboxes, include/exclude tags, groups and sort orders.
 * A library with what you're reading now, unread counts, and the latest chapters across your saved series.
 * Two reading modes: paged, or vertical for webtoons. Set a default in Settings, and pressing V in the reader changes it everywhere.
@@ -70,10 +70,10 @@ Include your OS, the extension and series involved, and the steps that reproduce
 
 <details><summary>Feature Requests</summary>
 
-Describe what you want to do and why. Source requests belong in the [keiyoushi extensions repo](https://github.com/keiyoushi/extensions), not here.
+Describe what you want to do and why. Source requests belong in the extension repo that hosts the source, not here.
 
 </details>
 
 ## Disclaimer
 
-Nano isn't affiliated with Mihon, Tachiyomi or keiyoushi. It doesn't host any content; extensions fetch it from third-party sites.
+Nano isn't affiliated with Mihon, Tachiyomi or any extension repo. It doesn't host any content; extensions fetch it from third-party sites.

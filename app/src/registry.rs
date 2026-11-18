@@ -1,6 +1,6 @@
 //! Installed extensions and their sources. Every jar is loaded into the host at startup.
 
-use crate::extensions::{self, Ext};
+use crate::extensions::{self, Ext, Repo};
 use crate::host::Host;
 use crate::store::Store;
 use crate::{Source, call};
@@ -24,13 +24,15 @@ pub struct Registry {
     data_dir: PathBuf,
     pub sources: Vec<SourceInfo>,
     pub installed: HashSet<String>,
+    /// Installed version per package, for extensions no added repo lists.
+    pub versions: std::collections::HashMap<String, String>,
     /// True once every installed extension has been tried.
     pub ready: bool,
     pub busy: HashSet<String>,
     pub errors: std::collections::HashMap<String, String>,
     pub index: Option<Arc<Vec<Ext>>>,
     pub status: SharedString,
-    fetching_index: bool,
+    pub index_errors: Vec<String>,
 }
 
 impl Registry {
@@ -40,47 +42,23 @@ impl Registry {
             data_dir,
             sources: vec![],
             installed: HashSet::new(),
+            versions: Default::default(),
             ready: false,
             busy: HashSet::new(),
             errors: Default::default(),
             index: None,
             status: "Loading extensions…".into(),
-            fetching_index: false,
+            index_errors: vec![],
         };
         cx.spawn(async move |this, cx| {
             let (host, dir) = this.read_with(cx, |r, _| (r.host.clone(), r.data_dir.clone())).ok()?;
-            let mut jars = { let dir = dir.clone(); cx.background_executor().spawn(async move { extensions::installed(&dir) }).await };
-            if jars.is_empty() {
-                // First run starts with MangaDex so there's something to read.
-                let _ = this.update(cx, |r, cx| {
-                    r.status = "Installing MangaDex…".into();
-                    cx.notify();
-                });
-                let dir = dir.clone();
-                let installed = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let index = extensions::fetch_index(&dir)?;
-                        let ext = index.iter().find(|e| e.pkg == extensions::DEFAULT_PACKAGE).ok_or("MangaDex is not in the repo")?;
-                        extensions::install(ext, &dir).map(|jar| (ext.pkg.clone(), jar))
-                    })
-                    .await;
-                match installed {
-                    Ok(jar) => jars.push(jar),
-                    Err(e) => {
-                        let _ = this.update(cx, |r, cx| {
-                            r.status = e.into();
-                            cx.notify();
-                        });
-                    }
-                }
-            }
+            let jars = { let dir = dir.clone(); cx.background_executor().spawn(async move { extensions::installed(&dir) }).await };
             for (pkg, jar) in jars {
                 load(&this, &host, cx, pkg, jar).await;
             }
             this.update(cx, |r, cx| {
                 r.ready = true;
-                if r.status.starts_with("Loading") || r.status.starts_with("Installing") {
+                if r.status.starts_with("Loading") {
                     r.status = "".into();
                 }
                 cx.notify();
@@ -121,27 +99,19 @@ impl Registry {
         self.sources.iter().filter(|s| self.enabled_languages(&s.pkg, store).contains(&s.lang)).cloned().collect()
     }
 
-    pub fn ensure_index(&mut self, cx: &mut Context<Self>) {
-        if self.index.is_some() || self.fetching_index {
-            return;
-        }
-        self.fetching_index = true;
+    /// Shows the cached lists right away, then fetches fresh ones. Call again after the repos change.
+    pub fn refresh_index(&mut self, repos: Vec<Repo>, cx: &mut Context<Self>) {
         let dir = self.data_dir.clone();
         cx.spawn(async move |this, cx| {
-            let cached = { let dir = dir.clone(); cx.background_executor().spawn(async move { extensions::cached_index(&dir) }).await };
-            if let Some(list) = cached {
-                let _ = this.update(cx, |r, cx| {
-                    r.index = Some(Arc::new(list));
-                    cx.notify();
-                });
-            }
-            let fresh = cx.background_executor().spawn(async move { extensions::fetch_index(&dir) }).await;
+            let cached = { let (dir, repos) = (dir.clone(), repos.clone()); cx.background_executor().spawn(async move { extensions::cached_index(&repos, &dir) }).await };
             let _ = this.update(cx, |r, cx| {
-                r.fetching_index = false;
-                match fresh {
-                    Ok(list) => r.index = Some(Arc::new(list)),
-                    Err(e) => r.status = e.into(),
-                }
+                r.index = Some(Arc::new(cached));
+                cx.notify();
+            });
+            let (fresh, errors) = cx.background_executor().spawn(async move { extensions::fetch_index(&repos, &dir) }).await;
+            let _ = this.update(cx, |r, cx| {
+                r.index = Some(Arc::new(fresh));
+                r.index_errors = errors;
                 cx.notify();
             });
         })
@@ -175,15 +145,19 @@ impl Registry {
     pub fn uninstall(&mut self, pkg: &str, cx: &mut Context<Self>) {
         extensions::uninstall(pkg, &self.data_dir);
         self.installed.remove(pkg);
+        self.versions.remove(pkg);
         self.sources.retain(|s| s.pkg != pkg);
         cx.notify();
     }
 }
 
 async fn load(this: &WeakEntity<Registry>, host: &Arc<Host>, cx: &mut AsyncApp, pkg: String, jar: PathBuf) {
-    let result = call(host, cx, "load", json!({ "jar": jar, "signingKey": extensions::SIGNING_KEY })).await;
+    let key = extensions::key_for(&jar);
+    let version = extensions::version_of(&jar);
+    let result = call(host, cx, "load", json!({ "jar": jar, "signingKey": key })).await;
     let _ = this.update(cx, |r, cx| {
         r.installed.insert(pkg.clone());
+        r.versions.insert(pkg.clone(), version);
         match result {
             Ok(list) => {
                 r.errors.remove(&pkg);

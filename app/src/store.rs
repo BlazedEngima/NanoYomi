@@ -151,6 +151,8 @@ struct Data {
     sync: crate::sync::Config,
     #[serde(default)]
     sidebar_collapsed: bool,
+    #[serde(default)]
+    repos: Vec<crate::extensions::Repo>,
 }
 
 #[derive(Clone)]
@@ -283,6 +285,21 @@ impl Store {
 
     pub fn set_zoom(&mut self, z: f32, cx: &mut Context<Self>) {
         self.data.zoom = Some(z);
+        self.save_soon(cx);
+    }
+
+    pub fn repos(&self) -> &[crate::extensions::Repo] {
+        &self.data.repos
+    }
+
+    pub fn add_repo(&mut self, repo: crate::extensions::Repo, cx: &mut Context<Self>) {
+        self.data.repos.retain(|r| r.url != repo.url);
+        self.data.repos.push(repo);
+        self.save_soon(cx);
+    }
+
+    pub fn remove_repo(&mut self, url: &str, cx: &mut Context<Self>) {
+        self.data.repos.retain(|r| r.url != url);
         self.save_soon(cx);
     }
 

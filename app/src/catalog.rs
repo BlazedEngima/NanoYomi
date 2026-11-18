@@ -1,8 +1,8 @@
-//! The Extensions screen: what's installed, then the keiyoushi repo, filterable by name and language.
+//! The Extensions screen: your repos, what's installed, then what the repos offer, filterable by name and language.
 
 use crate::u;
 use crate::covers::{Covers, Fetch, grid};
-use crate::extensions::Ext;
+use crate::extensions::{self, Ext};
 use crate::images::ImageCache;
 use crate::input::{InputEvent, TextInput};
 use crate::registry::Registry;
@@ -21,6 +21,7 @@ const CARD_MIN: f32 = 300.;
 
 #[derive(Clone, Copy)]
 enum Item {
+    Repos,
     Label(&'static str),
     Installed(usize),
     Row(usize),
@@ -32,6 +33,9 @@ pub struct Catalog {
     store: Entity<Store>,
     cache: Entity<ImageCache>,
     search: Entity<TextInput>,
+    repo_input: Entity<TextInput>,
+    adding: bool,
+    repo_error: Option<String>,
     icons: Covers,
     list: ListState,
     /// The list caches row heights, so re-measure after a zoom change.
@@ -48,18 +52,28 @@ pub struct Catalog {
 
 impl Catalog {
     pub fn new(registry: Entity<Registry>, store: Entity<Store>, cache: Entity<ImageCache>, cx: &mut Context<Self>) -> Self {
-        registry.update(cx, |r, cx| r.ensure_index(cx));
+        let repos = store.read(cx).repos().to_vec();
+        registry.update(cx, |r, cx| r.refresh_index(repos, cx));
         let search = cx.new(|cx| TextInput::new("Search extensions…", cx));
+        let repo_input = cx.new(|cx| {
+            let mut i = TextInput::new("Paste a repo address, like …/index.min.json", cx);
+            i.icon = false;
+            i
+        });
         let subs = vec![
             cx.observe(&registry, |_, _, cx| cx.notify()),
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify()),
+            cx.subscribe(&repo_input, |this, _, _: &InputEvent, cx| this.add_repo(cx)),
         ];
         Catalog {
             registry,
             store,
             cache,
             search,
+            repo_input,
+            adding: false,
+            repo_error: None,
             icons: Covers::default(),
             zoom_seen: 0.,
             list: ListState::new(0, ListAlignment::Top, u(600.)),
@@ -72,6 +86,96 @@ impl Catalog {
             nsfw: false,
             _subs: subs,
         }
+    }
+
+    fn add_repo(&mut self, cx: &mut Context<Self>) {
+        let input = self.repo_input.read(cx).text.trim().to_string();
+        if input.is_empty() || self.adding {
+            return;
+        }
+        self.adding = true;
+        self.repo_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { extensions::add_repo(&input) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.adding = false;
+                match result {
+                    Ok(repo) => {
+                        this.store.update(cx, |s, cx| s.add_repo(repo, cx));
+                        this.repo_input.update(cx, |i, _| i.text.clear());
+                        this.refresh(cx);
+                    }
+                    Err(e) => this.repo_error = Some(e),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        let repos = self.store.read(cx).repos().to_vec();
+        self.registry.update(cx, |r, cx| r.refresh_index(repos, cx));
+    }
+
+    fn repos(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let repos = self.store.read(cx).repos().to_vec();
+        let errors = self.registry.read(cx).index_errors.clone();
+        let rows = repos.into_iter().map(|repo| {
+            let url = repo.url.clone();
+            let error = errors.iter().find(|e| e.starts_with(&format!("{}: ", repo.name))).cloned();
+            div()
+                .py(u(10.))
+                .flex()
+                .items_center()
+                .gap_4()
+                .border_b_1()
+                .border_color(rgb(RULE))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(u(2.))
+                        .child(div().flex().items_baseline().gap_3().child(div().font_weight(FontWeight::SEMIBOLD).child(repo.name.clone())).child(
+                            div().min_w_0().truncate().font_family(MONO).text_size(u(12.)).text_color(rgb(FAINT)).child(repo.url.trim_end_matches("/index.json").to_string()),
+                        ))
+                        .child(div().font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child(format!("signed by {}…", &repo.key[..16])))
+                        .children(error.map(|e| div().text_size(u(13.)).text_color(rgb(ACCENT_TEXT)).child(e))),
+                )
+                .child(small_button(SharedString::from(format!("rm-repo-{url}")), "Remove", false).on_click(cx.listener(move |this, _, _, cx| {
+                    let url = url.clone();
+                    this.store.update(cx, |s, cx| s.remove_repo(&url, cx));
+                    this.refresh(cx);
+                })))
+        });
+        div()
+            .w_full()
+            .px(u(PAD))
+            .pt(u(24.))
+            .flex()
+            .flex_col()
+            .child(div().pb(u(6.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("REPOS"))
+            .children(rows)
+            .child(
+                div()
+                    .pt(u(12.))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().flex_1().max_w(u(560.)).child(self.repo_input.clone()))
+                    .child(if self.adding {
+                        small_button("add-repo", "Adding…", false).opacity(0.6)
+                    } else {
+                        small_button("add-repo", "Add repo", true).on_click(cx.listener(|this, _, _, cx| this.add_repo(cx)))
+                    }),
+            )
+            .child(div().pt(u(8.)).text_size(u(13.)).text_color(rgb(if self.repo_error.is_some() { ACCENT_TEXT } else { FAINT })).child(
+                self.repo_error.clone().unwrap_or_else(|| "The same repo addresses Mihon uses. Nano only installs extensions signed with the key a repo had when you added it.".into()),
+            ))
+            .into_any_element()
     }
 
     fn icon(&mut self, e: &Ext, size: f32, cx: &mut Context<Self>) -> AnyElement {
@@ -125,6 +229,16 @@ impl Catalog {
                 }))
             })
             .collect();
+        let have = registry.versions.get(&e.pkg).cloned().unwrap_or_else(|| e.version.clone());
+        let update = (!e.key.is_empty() && have != e.version).then(|| {
+            let id = SharedString::from(format!("up-{}", e.pkg));
+            if registry.busy.contains(&e.pkg) {
+                small_button(id, "Updating…", false).opacity(0.6)
+            } else {
+                let ext = e.clone();
+                small_button(id, "Update", true).on_click(cx.listener(move |this, _, _, cx| this.registry.update(cx, |r, cx| r.install(ext.clone(), cx))))
+            }
+        });
         let remove = small_button(SharedString::from(format!("rm-{}", e.pkg)), "Remove", false).on_click(cx.listener(
             move |this, _, _, cx| {
                 let pkg = pkg.clone();
@@ -161,12 +275,13 @@ impl Catalog {
                                             .font_family(MONO)
                                             .text_size(u(12.))
                                             .text_color(rgb(FAINT))
-                                            .child(if multi { format!("v{} · languages shown in Browse:", e.version) } else { format!("{} · v{}", e.langs.join(" "), e.version) }),
+                                            .child(if multi { format!("v{have} · languages shown in Browse:") } else { format!("{} · v{have}", e.langs.join(" ")) }),
                                     ),
                             )
                             .when(multi, |d| d.child(div().flex().flex_wrap().gap(u(6.)).children(chips)))
                             .children(error.map(|err| div().text_size(u(13.)).text_color(rgb(ACCENT_TEXT)).child(err))),
                     )
+                    .children(update)
                     .child(remove),
             )
             .into_any_element()
@@ -233,13 +348,21 @@ impl Catalog {
                 let text = if text == "AVAILABLE" { format!("AVAILABLE · {}", self.available.len()) } else { text.to_string() };
                 div().px(u(PAD)).pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child(text).into_any_element()
             }
+            Some(Item::Repos) => self.repos(cx),
             Some(Item::Installed(i)) => self.installed_row(i, cx),
             Some(Item::Row(r)) => {
                 let cards: Vec<AnyElement> =
                     (r * self.cols..((r + 1) * self.cols).min(self.available.len())).map(|i| self.card(i, cx)).collect();
                 div().flex().gap(u(GAP)).px(u(PAD)).pb(u(GAP)).children(cards).into_any_element()
             }
-            Some(Item::Empty) => div().px(u(PAD)).py_4().text_color(rgb(MUTED)).child("No extensions match.").into_any_element(),
+            Some(Item::Empty) => {
+                let text = if self.store.read(cx).repos().is_empty() {
+                    "Add a repo above to see its extensions. Nano doesn't come with one."
+                } else {
+                    "No extensions match."
+                };
+                div().px(u(PAD)).py_4().text_color(rgb(MUTED)).child(text).into_any_element()
+            }
             None => div().into_any_element(),
         }
     }
@@ -298,6 +421,13 @@ impl Render for Catalog {
                 && (nsfw || !e.nsfw)
         };
         self.installed = index.iter().filter(|e| registry.installed.contains(&e.pkg)).cloned().collect();
+        let mut orphans: Vec<&String> = registry.installed.iter().filter(|p| !index.iter().any(|e| &e.pkg == *p)).collect();
+        orphans.sort();
+        for pkg in orphans {
+            let name = registry.sources.iter().find(|s| &s.pkg == pkg).map_or_else(|| pkg.rsplit('.').next().unwrap_or(pkg).to_string(), |s| s.name.clone());
+            let langs = registry.languages(pkg);
+            self.installed.push(Ext::orphan(pkg, &name, registry.versions.get(pkg).map_or("", |v| v.as_str()), langs));
+        }
         self.available = index.iter().filter(|e| !registry.installed.contains(&e.pkg) && matches(e)).cloned().collect();
         (self.cols, self.card_w) = grid(crate::content_width(window), PAD, GAP, CARD_MIN);
 
@@ -309,13 +439,14 @@ impl Render for Catalog {
         top.sort_by_key(|(l, n)| (std::cmp::Reverse(*n), *l));
         let top: Vec<String> = top.into_iter().take(12).map(|(l, _)| l.to_string()).collect();
 
-        let note = if index.is_empty() {
-            if registry.status.is_empty() { "loading the repo…".to_string() } else { registry.status.to_string() }
-        } else {
-            format!("{} installed · {} in keiyoushi", self.installed.len(), index.len())
+        let repos = self.store.read(cx).repos().len();
+        let note = match repos {
+            0 => format!("{} installed · no repos yet", self.installed.len()),
+            1 => format!("{} installed · {} in 1 repo", self.installed.len(), index.len()),
+            n => format!("{} installed · {} in {n} repos", self.installed.len(), index.len()),
         };
 
-        let mut items = vec![];
+        let mut items = vec![Item::Repos];
         if !self.installed.is_empty() {
             items.push(Item::Label("INSTALLED"));
             items.extend((0..self.installed.len()).map(Item::Installed));
@@ -328,6 +459,8 @@ impl Render for Catalog {
         if items.len() != self.list.item_count() {
             self.list.reset(items.len());
         }
+        // The repos block grows with errors and new repos without changing the count.
+        self.list.remeasure_items(0..1);
         self.items = items;
         let this = cx.entity();
 

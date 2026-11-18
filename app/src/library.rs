@@ -67,13 +67,7 @@ impl Sort {
         }
     }
 
-    fn next(self) -> Sort {
-        match self {
-            Sort::LastRead => Sort::MostNew,
-            Sort::MostNew => Sort::Title,
-            Sort::Title => Sort::LastRead,
-        }
-    }
+    const ALL: [Sort; 3] = [Sort::LastRead, Sort::MostNew, Sort::Title];
 }
 
 pub struct Library {
@@ -99,6 +93,8 @@ pub struct Library {
     sort: Sort,
     as_list: bool,
     relayout: bool,
+    sort_open: bool,
+    sort_closed: Option<std::time::Instant>,
     kept: usize,
     /// Library indexes after the filter and sort.
     shown: Vec<usize>,
@@ -144,6 +140,8 @@ impl Library {
             // NANO_LIBRARY=list starts in the list view (for testing).
             as_list: std::env::var("NANO_LIBRARY").as_deref() == Ok("list"),
             relayout: false,
+            sort_open: false,
+            sort_closed: None,
             kept: 0,
             shown: vec![],
             shelf: vec![],
@@ -353,12 +351,85 @@ impl Library {
             .gap(u(10.))
             .child(Self::section_title("EVERYTHING"))
             .child(div().ml_auto().flex().flex_wrap().gap(u(10.)).child(group().children(filters))
-            .child(group().child(segment("sort", format!("Sort · {}", self.sort.label()), false).on_click(cx.listener(|this, _, _, cx| {
-                this.sort = this.sort.next();
-                this.relayout = true;
-                cx.notify();
-            }))))
+            .child(self.sort_menu(cx))
             .child(group().children(layouts)))
+            .into_any_element()
+    }
+
+    fn sort_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.sort_open;
+        let button = div()
+            .id("sort")
+            .h(u(40.))
+            .w(u(200.))
+            .px(u(16.))
+            .rounded(u(20.))
+            .border_1()
+            .border_color(rgb(LINE))
+            .flex()
+            .items_center()
+            .gap(u(8.))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(SURFACE)))
+            .child(div().flex_1().min_w_0().truncate().text_size(u(13.)).text_color(rgb(crate::BODY)).child(self.sort.label()))
+            .child(
+                gpui::svg()
+                    .path("icons/chevron.svg")
+                    .flex_none()
+                    .size(u(14.))
+                    .text_color(rgb(MUTED))
+                    .when(open, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                // The click that closes the menu also lands on the button, so don't reopen it.
+                let just_closed = this.sort_closed.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(300));
+                this.sort_open = !this.sort_open && !just_closed;
+                cx.notify();
+            }));
+        let current = self.sort;
+        let items = Sort::ALL.map(|sort| {
+            let on = sort == current;
+            div()
+                .id(sort.label())
+                .px(u(12.))
+                .py(u(8.))
+                .rounded(u(7.))
+                .text_size(u(13.))
+                .cursor_pointer()
+                .text_color(rgb(if on { ACCENT_TEXT } else { crate::BODY }))
+                .when(on, |d| d.bg(rgb(crate::HOVER)))
+                .hover(|d| d.bg(rgb(crate::HOVER)).text_color(rgb(if on { ACCENT_TEXT } else { TEXT })))
+                .child(sort.label())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.sort = sort;
+                    this.sort_open = false;
+                    this.relayout = true;
+                    cx.notify();
+                }))
+        });
+        let panel = div()
+            .id("sort-menu")
+            .mt(u(6.))
+            .w(u(200.))
+            .p(u(5.))
+            .rounded(u(10.))
+            .border_1()
+            .border_color(rgb(LINE))
+            .bg(rgb(SURFACE))
+            .shadow_lg()
+            .occlude()
+            .children(items)
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.sort_open = false;
+                this.sort_closed = Some(std::time::Instant::now());
+                cx.notify();
+            }));
+        // Drawn after the cards so it sits on top of them.
+        div()
+            .flex_none()
+            .relative()
+            .child(button)
+            .when(open, |d| d.child(gpui::deferred(panel.absolute().top(u(40.)).left_0()).with_priority(1)))
             .into_any_element()
     }
 

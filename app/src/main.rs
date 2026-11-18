@@ -95,6 +95,7 @@ impl gpui::AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         Ok(match path {
             "icons/search.svg" => Some(include_bytes!("../assets/icons/search.svg").as_slice().into()),
+            "icons/chevron.svg" => Some(include_bytes!("../assets/icons/chevron.svg").as_slice().into()),
             "icons/check.svg" => Some(include_bytes!("../assets/icons/check.svg").as_slice().into()),
             "icons/sidebar.svg" => Some(include_bytes!("../assets/icons/sidebar.svg").as_slice().into()),
             _ => None,
