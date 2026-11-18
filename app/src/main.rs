@@ -31,7 +31,7 @@ use library::{GoBrowse, Library, Resume};
 use registry::Registry;
 use store::Store;
 use gpui::{
-    AnyElement, App, AppContext, AsyncApp, Bounds, Context, Entity, FontWeight, InteractiveElement, IntoElement,
+    Animation, AnimationExt, AnyElement, App, AppContext, AsyncApp, Bounds, Context, Entity, FontWeight, InteractiveElement, IntoElement,
     ParentElement, Render, RenderImage, SharedString, StatefulInteractiveElement, Styled, Subscription,
     TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::FluentBuilder, px, rgb, size,
 };
@@ -82,13 +82,17 @@ fn set_sidebar_width(w: f32) {
     SIDEBAR.store(w.to_bits(), Ordering::Relaxed);
 }
 
-static PANEL_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The series panel's width right now, which changes while it slides.
+static PANEL: AtomicU32 = AtomicU32::new(0);
 
-/// The window's width minus the sidebar and any open series panel, for sizing grids.
+/// The window's width minus the sidebar and the series panel, as they are this frame, for sizing grids.
 pub fn content_width(window: &Window) -> f32 {
-    let panel = if PANEL_OPEN.load(Ordering::Relaxed) { manga::PANEL } else { 0. };
-    f32::from(window.viewport_size().width) - (f32::from_bits(SIDEBAR.load(Ordering::Relaxed)) + panel) * zoom()
+    let taken = f32::from_bits(SIDEBAR.load(Ordering::Relaxed)) + f32::from_bits(PANEL.load(Ordering::Relaxed));
+    f32::from(window.viewport_size().width) - taken * zoom()
 }
+
+/// How long the sidebar and series panel take to slide.
+pub const SLIDE: std::time::Duration = std::time::Duration::from_millis(240);
 
 struct Assets;
 
@@ -300,6 +304,11 @@ struct Root {
     migrate: Option<(Entity<migrate::Migrate>, Subscription)>,
     reader: Option<(Entity<Reader>, Subscription)>,
     palette: Option<palette::Palette>,
+    /// The series panel that's sliding shut, kept until it's out of sight.
+    closing: Option<Entity<MangaView>>,
+    /// Bumped each time the panel opens or closes, or the sidebar folds, so their slides start over.
+    panel_moves: usize,
+    sidebar_moves: usize,
     focus: gpui::FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -331,7 +340,7 @@ impl Root {
             let store = store.clone();
             cx.new(|cx| settings::Settings::new(store, cx))
         });
-        Root { cache, store, registry, tab, library, browse, catalog: None, history: None, settings, manga: None, migrate: None, reader: None, palette: None, focus, _subs: subs }
+        Root { cache, store, registry, tab, library, browse, catalog: None, history: None, settings, manga: None, migrate: None, reader: None, palette: None, closing: None, panel_moves: 0, sidebar_moves: 0, focus, _subs: subs }
     }
 
     fn zoom_by(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -347,7 +356,7 @@ impl Root {
             l.updates_page = tab == Tab::Updates;
             cx.notify();
         });
-        self.manga = None;
+        self.close_manga(cx);
         self.migrate = None;
         match tab {
             Tab::Extensions if self.catalog.is_none() => {
@@ -374,10 +383,7 @@ impl Root {
         let (source, manga, cache, store) = (ev.source.clone(), ev.manga.clone(), self.cache.clone(), self.store.clone());
         let view = cx.new(|cx| MangaView::new(source, cache, store, manga, cx));
         let sub = cx.subscribe_in(&view, window, |this, view, ev: &MangaEvent, window, cx| match ev {
-            MangaEvent::Back => {
-                this.manga = None;
-                cx.notify();
-            }
+            MangaEvent::Back => this.close_manga(cx),
             MangaEvent::Read { chapters, index, page } => {
                 let (source, manga) = { let v = view.read(cx); (v.source.clone(), v.manga.clone()) };
                 this.open_reader(source, manga, chapters.clone(), *index, *page, window, cx);
@@ -389,7 +395,29 @@ impl Root {
                 }
             }
         });
+        if self.manga.is_none() {
+            self.panel_moves += 1;
+        }
+        self.closing = None;
         self.manga = Some((view, sub));
+        cx.notify();
+    }
+
+    fn close_manga(&mut self, cx: &mut Context<Self>) {
+        let Some((view, _)) = self.manga.take() else { return };
+        self.closing = Some(view);
+        self.panel_moves += 1;
+        let moves = self.panel_moves;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SLIDE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.panel_moves == moves {
+                    this.closing = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -452,11 +480,30 @@ impl Render for Root {
             Tab::History => self.history.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
             Tab::Settings => self.settings.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
         };
-        // The series opens beside the grid, so you keep your place in it.
-        let panel = self.manga.as_ref().filter(|_| self.migrate.is_none()).map(|(m, _)| {
-            div().flex_none().w(u(manga::PANEL)).h_full().border_l_1().border_color(rgb(RULE)).bg(rgb(0x11100E)).child(m.clone())
+        // The series slides open beside the grid, so you keep your place in it.
+        let open = self.manga.is_some();
+        let view = self.manga.as_ref().map(|(m, _)| m.clone()).or_else(|| self.closing.clone()).filter(|_| self.migrate.is_none());
+        let panel = view.map(|view| {
+            let (from, to) = if open { (0., manga::PANEL) } else { (manga::PANEL, 0.) };
+            div()
+                .flex_none()
+                .relative()
+                .h_full()
+                .overflow_hidden()
+                .border_l_1()
+                .border_color(rgb(RULE))
+                .bg(rgb(0x11100E))
+                // A fixed width pinned to the right, so it slides in whole instead of rewrapping.
+                .child(div().absolute().top_0().bottom_0().right_0().w(u(manga::PANEL)).child(view))
+                .with_animation(("panel", self.panel_moves), Animation::new(SLIDE).with_easing(gpui::ease_out_quint()), move |d, t| {
+                    let w = from + (to - from) * t;
+                    PANEL.store(w.to_bits(), Ordering::Relaxed);
+                    d.w(u(w))
+                })
         });
-        PANEL_OPEN.store(panel.is_some(), Ordering::Relaxed);
+        if panel.is_none() {
+            PANEL.store(0f32.to_bits(), Ordering::Relaxed);
+        }
         root.track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ShowLibrary, window, cx| this.show(Tab::Library, window, cx)))
             .on_action(cx.listener(|this, _: &ShowBrowse, window, cx| this.show(Tab::Browse, window, cx)))
@@ -470,8 +517,8 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom_by(1. - zoom(), cx)))
             .child(self.sidebar(cx))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
-                if ev.keystroke.key == "escape" && this.manga.take().is_some() {
-                    cx.notify();
+                if ev.keystroke.key == "escape" {
+                    this.close_manga(cx);
                 }
             }))
             .child(div().flex_1().min_w_0().h_full().child(screen))

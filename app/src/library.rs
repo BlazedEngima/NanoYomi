@@ -7,6 +7,7 @@ use crate::images::ImageCache;
 use crate::registry::Registry;
 use crate::store::{Series, Store, ago, now_ms};
 use crate::segmented::Segmented;
+use gpui::AnimationExt;
 use crate::{ACCENT, ACCENT_TEXT, FAINT, LINE, MONO, MUTED, RULE, SURFACE, Source, TEXT, heading, pill};
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement, ListAlignment, ListState,
@@ -463,7 +464,12 @@ impl Library {
             .flex_none()
             .relative()
             .child(button)
-            .when(open, |d| d.child(gpui::deferred(panel.absolute().top(u(40.)).left_0()).with_priority(1)))
+            .when(open, |d| {
+                let panel = panel.absolute().left_0().with_animation("sort-in", gpui::Animation::new(std::time::Duration::from_millis(140)).with_easing(gpui::ease_out_quint()), |d, t| {
+                    d.opacity(t).top(u(40. - 6. * (1. - t)))
+                });
+                d.child(gpui::deferred(panel).with_priority(1))
+            })
             .into_any_element()
     }
 

@@ -2,6 +2,7 @@
 
 use crate::store::SyncStatus;
 use crate::*;
+use gpui::{Animation, AnimationExt};
 
 pub const WIDE: f32 = 232.;
 pub const NARROW: f32 = 64.;
@@ -54,7 +55,7 @@ impl Root {
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         let on = !self.store.read(cx).sidebar_collapsed();
         self.store.update(cx, |s, cx| s.set_sidebar_collapsed(on, cx));
-        set_sidebar_width(if on { NARROW } else { WIDE });
+        self.sidebar_moves += 1;
         cx.notify();
     }
 
@@ -163,9 +164,12 @@ impl Root {
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
             );
 
+        let (from, to) = if narrow { (WIDE, NARROW) } else { (NARROW, WIDE) };
+        // The first frame starts settled, so launching doesn't play the slide.
+        let from = if self.sidebar_moves == 0 { to } else { from };
         div()
             .flex_none()
-            .w(u(if narrow { NARROW } else { WIDE }))
+            .overflow_hidden()
             .h_full()
             .bg(rgb(0x11100E))
             .border_r_1()
@@ -224,5 +228,10 @@ impl Root {
                     .child(div().flex_none().size(u(6.)).rounded(u(3.)).bg(rgb(color)))
                     .when(!narrow, |d| d.child(text))
             }))
+            .with_animation(("sidebar", self.sidebar_moves), Animation::new(SLIDE).with_easing(gpui::ease_out_quint()), move |d, t| {
+                let w = from + (to - from) * t;
+                set_sidebar_width(w);
+                d.w(u(w))
+            })
     }
 }

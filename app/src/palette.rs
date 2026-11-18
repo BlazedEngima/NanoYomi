@@ -2,6 +2,7 @@
 
 use crate::input::{InputEvent, TextInput};
 use crate::*;
+use gpui::{Animation, AnimationExt};
 
 #[derive(Clone)]
 enum Go {
@@ -201,7 +202,11 @@ impl Root {
                                 .when(empty, |d| d.child(div().p(u(24.)).flex().justify_center().text_color(rgb(MUTED)).child("Nothing matches.")))
                                 .children(rows),
                         ),
-                ),
+                )
+                // Fades in and rises a little. The state is dropped while closed, so it plays on every open.
+                .with_animation("palette-in", Animation::new(std::time::Duration::from_millis(160)).with_easing(gpui::ease_out_quint()), |d, t| {
+                    d.opacity(t).pt(u(110. + 12. * (1. - t)))
+                }),
         )
     }
 }
