@@ -316,7 +316,7 @@ impl MangaView {
                         .items_center()
                         .justify_center()
                         .text_size(u(11.))
-                        .when(on, |d| d.bg(rgb(crate::ACCENT)).border_color(rgb(crate::ACCENT)).text_color(rgb(crate::BG)).child("✓"))
+                        .when(on, |d| d.bg(rgb(crate::ACCENT)).border_color(rgb(crate::ACCENT)).child(crate::check(12., crate::BG)))
                         .when(!on, |d| d.border_color(rgb(LINE))),
                 )
                 .child(div().flex_1().min_w_0().truncate().text_size(u(13.)).child(name))
@@ -491,7 +491,8 @@ impl MangaView {
                             }))
                             .when(installed && has_chapters, |d| d.child(pill("newest", "Newest chapter", false).on_click(cx.listener(|this, _, _, cx| this.read(0, 0, cx)))))
                             .child(
-                                pill("library", if in_library { "✓ In library" } else { "+ Add to library" }, false)
+                                pill("library", if in_library { "In library" } else { "+ Add to library" }, false)
+                                    .when(in_library, |d| d.gap_2().child(crate::check(16., TEXT)).flex_row_reverse())
                                     .on_click(cx.listener(|this, _, _, cx| this.toggle_library(cx))),
                             )
                             .when(installed && saved.is_some(), |d| d.child(pill("migrate", "Migrate", false).on_click(cx.listener(|_, _, _, cx| cx.emit(MangaEvent::Migrate))))),

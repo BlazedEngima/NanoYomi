@@ -399,7 +399,7 @@ impl Library {
                     .font_family(MONO)
                     .text_size(u(12.))
                     .text_color(rgb(ACCENT_TEXT))
-                    .child(if unread > 0 { format!("{unread} new") } else { "✓".into() }),
+                    .map(|d| if unread > 0 { d.child(format!("{unread} new")) } else { d.child(crate::check(16., ACCENT_TEXT)) }),
             )
             .on_click(cx.listener(move |this, _, _, cx| this.open(i, cx)));
         div().w_full().px(u(PAD)).child(row).into_any_element()

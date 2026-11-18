@@ -70,7 +70,7 @@ pub fn next_state(f: &Value, value: usize) -> Value {
     }
 }
 
-fn chip(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, on: bool) -> gpui::Stateful<gpui::Div> {
+fn chip(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, on: bool, mark: bool) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .h(u(30.))
@@ -84,6 +84,8 @@ fn chip(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, on: bool
         .border_1()
         .when(on, |d| d.bg(rgb(TEXT)).border_color(rgb(TEXT)).text_color(rgb(BG)).font_weight(FontWeight::SEMIBOLD))
         .when(!on, |d| d.border_color(rgb(LINE)).text_color(rgb(MUTED)).hover(|s| s.bg(rgb(HOVER))))
+        .gap(u(6.))
+        .when(mark, |d| d.child(crate::check(13., BG)))
         .child(label.into())
 }
 
@@ -117,11 +119,11 @@ fn control(p: Path, f: &Value, inputs: &HashMap<Path, Entity<TextInput>>, cx: &m
             .into_any_element(),
         "checkbox" => {
             let on = f["state"].as_bool().unwrap_or(false);
-            chip(id(p, 0), if on { format!("✓ {name}") } else { name.to_string() }, on).on_click(set(0, cx)).into_any_element()
+            chip(id(p, 0), name.to_string(), on, on).on_click(set(0, cx)).into_any_element()
         }
         "tristate" => {
             let state = f["state"].as_u64().unwrap_or(0);
-            let c = chip(id(p, 0), match state { 1 => format!("✓ {name}"), 2 => format!("✕ {name}"), _ => name.to_string() }, state == 1);
+            let c = chip(id(p, 0), if state == 2 { format!("✕ {name}") } else { name.to_string() }, state == 1, state == 1);
             let c = if state == 2 { c.border_color(rgb(ACCENT_TEXT)).text_color(rgb(ACCENT_TEXT)).line_through() } else { c };
             c.on_click(set(0, cx)).into_any_element()
         }
@@ -138,7 +140,7 @@ fn control(p: Path, f: &Value, inputs: &HashMap<Path, Entity<TextInput>>, cx: &m
                     let label = v.as_str().unwrap_or("").to_string();
                     let on = current == Some(k);
                     let label = if kind == "sort" && on { format!("{label} {}", if ascending { "↑" } else { "↓" }) } else { label };
-                    chip(id(p, k), label, on).on_click(set(k, cx))
+                    chip(id(p, k), label, on, false).on_click(set(k, cx))
                 })
                 .collect();
             div().flex().flex_col().gap(u(8.)).child(title(name)).child(div().flex().flex_wrap().gap(u(6.)).children(chips)).into_any_element()

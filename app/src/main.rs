@@ -95,6 +95,7 @@ impl gpui::AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         Ok(match path {
             "icons/search.svg" => Some(include_bytes!("../assets/icons/search.svg").as_slice().into()),
+            "icons/check.svg" => Some(include_bytes!("../assets/icons/check.svg").as_slice().into()),
             "icons/sidebar.svg" => Some(include_bytes!("../assets/icons/sidebar.svg").as_slice().into()),
             _ => None,
         })
@@ -106,6 +107,11 @@ impl gpui::AssetSource for Assets {
 
 pub fn search_icon() -> impl IntoElement {
     gpui::svg().path("icons/search.svg").flex_none().size(u(16.)).text_color(rgb(FAINT))
+}
+
+/// The ✓ glyph falls back to a font where it looks like √, so draw it.
+pub fn check(size: f32, color: u32) -> impl IntoElement {
+    gpui::svg().path("icons/check.svg").flex_none().size(u(size)).text_color(rgb(color))
 }
 
 pub const DISPLAY: &str = "Big Shoulders Display";
@@ -179,7 +185,18 @@ static SOLVING: async_lock::Mutex<()> = async_lock::Mutex::new(());
 
 /// Calls the host, and on a Cloudflare check solves it (with the user's solver if one is set) and retries once.
 pub async fn call(host: &Arc<Host>, cx: &mut AsyncApp, op: &str, params: Value) -> Result<Value, String> {
-    match host.call(op, params.clone()).await {
+    let mut first = host.call(op, params.clone()).await;
+    // Opening a series while the Library checks it would ask twice at once, which extensions refuse. Wait instead.
+    for _ in 0..60 {
+        match &first {
+            Err(e) if e.to_string().contains("must not be called concurrently") => {
+                cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                first = host.call(op, params.clone()).await;
+            }
+            _ => break,
+        }
+    }
+    match first {
         Err(HostError::Challenge { .. }) => {
             let _solving = SOLVING.lock().await;
             // Another request may have solved it while we waited.
