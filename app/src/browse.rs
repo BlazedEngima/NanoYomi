@@ -349,11 +349,13 @@ impl Render for Browse {
                     .px(u(PAD))
                     .pt(u(28.))
                     .flex()
+                    .flex_wrap()
                     .items_end()
                     .gap_4()
-                    .child(div().flex_1().min_w_0().child(heading(&title, note)))
+                    .child(div().flex_none().max_w_full().child(heading(&title, note)))
                     .child(
                         div()
+                            .ml_auto()
                             .flex()
                             .gap_1()
                             .p_1()
@@ -374,7 +376,7 @@ impl Render for Browse {
                                 })))
                             }),
                     )
-                    .child(div().w(u(300.)).child(self.search.clone())),
+                    .child(div().w(u(300.)).max_w_full().child(self.search.clone())),
             )
             .child(
                 uniform_list(

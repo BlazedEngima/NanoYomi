@@ -60,7 +60,7 @@ impl Root {
 
     pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let narrow = self.store.read(cx).sidebar_collapsed();
-        let in_screen = self.manga.is_none() && self.migrate.is_none();
+        let in_screen = self.migrate.is_none();
         let nav = |tab: Tab, jp: &'static str, en: &'static str, cx: &mut Context<Self>| {
             let on = in_screen && self.tab == tab;
             item(en, ja(jp, on, narrow), en.into(), on, narrow).on_click(cx.listener(move |this, _, window, cx| this.show(tab, window, cx)))

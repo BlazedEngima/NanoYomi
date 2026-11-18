@@ -80,9 +80,12 @@ fn set_sidebar_width(w: f32) {
     SIDEBAR.store(w.to_bits(), Ordering::Relaxed);
 }
 
-/// The window's width minus the sidebar, for sizing grids.
+static PANEL_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The window's width minus the sidebar and any open series panel, for sizing grids.
 pub fn content_width(window: &Window) -> f32 {
-    f32::from(window.viewport_size().width) - f32::from_bits(SIDEBAR.load(Ordering::Relaxed)) * zoom()
+    let panel = if PANEL_OPEN.load(Ordering::Relaxed) { manga::PANEL } else { 0. };
+    f32::from(window.viewport_size().width) - (f32::from_bits(SIDEBAR.load(Ordering::Relaxed)) + panel) * zoom()
 }
 
 struct Assets;
@@ -393,15 +396,19 @@ impl Render for Root {
         if let Some((reader, _)) = &self.reader {
             return root.child(reader.clone());
         }
-        let screen: AnyElement = match (&self.manga, self.tab) {
+        let screen: AnyElement = match self.tab {
             _ if self.migrate.is_some() => self.migrate.as_ref().unwrap().0.clone().into_any_element(),
-            (Some((manga, _)), _) => manga.clone().into_any_element(),
-            (None, Tab::Library) => self.library.clone().into_any_element(),
-            (None, Tab::Browse) => self.browse.clone().into_any_element(),
-            (None, Tab::Extensions) => self.catalog.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
-            (None, Tab::History) => self.history.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
-            (None, Tab::Settings) => self.settings.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
+            Tab::Library => self.library.clone().into_any_element(),
+            Tab::Browse => self.browse.clone().into_any_element(),
+            Tab::Extensions => self.catalog.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
+            Tab::History => self.history.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
+            Tab::Settings => self.settings.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
         };
+        // The series opens beside the grid, so you keep your place in it.
+        let panel = self.manga.as_ref().filter(|_| self.migrate.is_none()).map(|(m, _)| {
+            div().flex_none().w(u(manga::PANEL)).h_full().border_l_1().border_color(rgb(RULE)).bg(rgb(0x11100E)).child(m.clone())
+        });
+        PANEL_OPEN.store(panel.is_some(), Ordering::Relaxed);
         root.track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ShowLibrary, window, cx| this.show(Tab::Library, window, cx)))
             .on_action(cx.listener(|this, _: &ShowBrowse, window, cx| this.show(Tab::Browse, window, cx)))
@@ -414,7 +421,13 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(-0.1, cx)))
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom_by(1. - zoom(), cx)))
             .child(self.sidebar(cx))
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" && this.manga.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .child(div().flex_1().min_w_0().h_full().child(screen))
+            .children(panel)
     }
 }
 

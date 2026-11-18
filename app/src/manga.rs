@@ -2,7 +2,7 @@
 //! Chapters can be searched and filtered by scanlator, which on multi-language sources means by language too.
 
 use crate::u;
-use crate::covers::{CARD_H, CARD_W, Covers, Fetch};
+use crate::covers::{Covers, Fetch};
 use crate::images::ImageCache;
 use crate::input::{InputEvent, TextInput};
 use crate::store::{Store, default_hidden, now_ms, scanlator_counts, visible_chapters};
@@ -15,7 +15,9 @@ use gpui::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-const PAD: f32 = 40.;
+const PAD: f32 = 24.;
+/// The series panel's width beside the grid.
+pub const PANEL: f32 = 440.;
 
 pub enum MangaEvent {
     Back,
@@ -195,9 +197,8 @@ impl MangaView {
                         .py_2()
                         .border_b_1()
                         .border_color(rgb(LINE))
-                        .child(div().w(u(120.)).child("DATE"))
                         .child(div().flex_1().child("CHAPTER"))
-                        .child(div().child("SCANLATOR")),
+                        .child(div().child("DATE")),
                 )
                 .into_any_element(),
             Some(Item::Row(r)) => {
@@ -215,14 +216,21 @@ impl MangaView {
                             .w_full()
                             .flex()
                             .items_center()
-                            .py(u(11.))
+                            .py(u(9.))
+                            .px(u(4.))
                             .border_b_1()
                             .border_color(rgb(RULE))
                             .hover(|s| s.bg(rgb(SURFACE)))
                             .cursor_pointer()
-                            .child(mono(div()).w(u(120.)).flex_none().text_color(rgb(MUTED)).child(date))
-                            .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(name))
-                            .child(div().flex_none().max_w(u(320.)).truncate().pl_4().text_size(u(13.)).text_color(rgb(MUTED)).child(group))
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().truncate().font_weight(FontWeight::MEDIUM).child(name))
+                                    .when(!group.is_empty(), |d| d.child(div().truncate().text_size(u(12.)).text_color(rgb(FAINT)).child(group))),
+                            )
+                            .child(mono(div()).flex_none().text_color(rgb(MUTED)).child(date))
                             .on_click(cx.listener(move |this, _, _, cx| this.read(i, 0, cx))),
                     )
                     .into_any_element()
@@ -252,11 +260,10 @@ impl MangaView {
                 div()
                     .w_full()
                     .flex()
-                    .items_end()
-                    .gap_4()
-                    .child(div().flex_1().min_w_0().child(heading("Chapters", note)))
-                    .children(picker)
-                    .child(div().w(u(300.)).child(self.search.clone())),
+                    .flex_col()
+                    .gap_3()
+                    .child(div().w_full().flex().items_end().gap_4().child(div().flex_1().min_w_0().child(heading("Chapters", note))).children(picker))
+                    .child(self.search.clone()),
             )
             .into_any_element()
     }
@@ -398,66 +405,83 @@ impl MangaView {
         div()
             .w_full()
             .flex()
-            .gap(u(48.))
+            .flex_col()
+            .gap(u(14.))
             .px(u(PAD))
-            .pt(u(32.))
-            .pb(u(36.))
+            .pt(u(22.))
+            .pb(u(28.))
             .child(
                 div()
-                    .flex_none()
-                    .w(u(CARD_W * 1.15))
-                    .h(u(CARD_H * 1.15))
-                    .rounded(u(4.))
-                    .overflow_hidden()
-                    .bg(rgb(SURFACE))
-                    .shadow_lg()
-                    .when_some(cover, |d, image| d.child(img(image).size_full().object_fit(ObjectFit::Cover))),
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(mono(div()).flex_1().min_w_0().truncate().text_size(u(11.)).text_color(rgb(ACCENT_TEXT)).child(kicker))
+                    .child(
+                        div()
+                            .id("close")
+                            .flex_none()
+                            .size(u(30.))
+                            .rounded(u(15.))
+                            .border_1()
+                            .border_color(rgb(LINE))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(rgb(MUTED))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                            .child("✕")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(MangaEvent::Back))),
+                    ),
             )
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
                     .flex()
-                    .flex_col()
-                    .gap(u(14.))
-                    .child(
-                        mono(div())
-                            .id("back")
-                            .text_color(rgb(FAINT))
-                            .hover(|s| s.text_color(rgb(TEXT)))
-                            .cursor_pointer()
-                            .child("← BACK")
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(MangaEvent::Back))),
-                    )
-                    .child(mono(div()).text_color(rgb(ACCENT_TEXT)).child(kicker))
+                    .gap(u(16.))
                     .child(
                         div()
-                            .font_family(DISPLAY)
-                            .font_weight(FontWeight::EXTRA_BOLD)
-                            .text_size(u(40.))
-                            .line_height(relative(1.))
-                            .max_w(u(820.))
-                            .line_clamp(2)
-                            .child(title),
+                            .flex_none()
+                            .w(u(120.))
+                            .h(u(180.))
+                            .rounded(u(4.))
+                            .overflow_hidden()
+                            .bg(rgb(SURFACE))
+                            .when_some(cover, |d, image| d.child(img(image).size_full().object_fit(ObjectFit::Cover))),
                     )
-                    .when(!people.is_empty(), |d| d.child(div().text_size(u(15.)).text_color(rgb(MUTED)).child(people)))
-                    .when_some(self.text("description"), |d, t| {
-                        d.child(div().max_w(u(720.)).text_size(u(15.)).line_height(relative(1.55)).text_color(rgb(BODY)).child(crate::rich::render(&t)))
-                    })
-                    .when(!tags.is_empty(), |d| {
-                        d.child(div().flex().flex_wrap().gap_2().max_w(u(720.)).children(tags.into_iter().map(|t| {
-                            div().px(u(10.)).py(u(3.)).rounded(u(12.)).border_1().border_color(rgb(LINE)).text_size(u(12.5)).text_color(rgb(BODY)).child(t)
-                        })))
-                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(u(8.))
+                            .child(
+                                div()
+                                    .font_family(DISPLAY)
+                                    .font_weight(FontWeight::EXTRA_BOLD)
+                                    .text_size(u(28.))
+                                    .line_height(relative(1.))
+                                    .line_clamp(4)
+                                    .text_ellipsis()
+                                    .child(title.to_uppercase()),
+                            )
+                            .when(!people.is_empty(), |d| d.child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(people)))
+                            .when(!tags.is_empty(), |d| {
+                                d.child(div().flex().flex_wrap().gap(u(6.)).mt_1().children(tags.into_iter().map(|t| {
+                                    div().px(u(9.)).py(u(2.)).rounded(u(11.)).border_1().border_color(rgb(LINE)).text_size(u(12.)).text_color(rgb(BODY)).child(t)
+                                })))
+                            }),
+                    ),
+            )
                     .child(
                         div()
                             .flex()
-                            .gap(u(10.))
-                            .mt_2()
+                            .flex_wrap()
+                            .gap(u(8.))
                             .when(!installed, |d| d.child(pill("migrate", "Migrate to another source", true).on_click(cx.listener(|_, _, _, cx| cx.emit(MangaEvent::Migrate)))))
                             .when(installed, |d| d.map(|d| match resume {
                                 Some((index, page, name)) => d.child(
-                                    pill("continue", format!("Continue · {name}"), true).max_w(u(420.)).on_click(cx.listener(move |this, _, _, cx| this.read(index, page, cx))),
+                                    pill("continue", format!("Continue · {name}"), true).max_w_full().on_click(cx.listener(move |this, _, _, cx| this.read(index, page, cx))),
                                 ),
                                 None if has_chapters => d.child(pill("first", "Start reading", true).on_click(cx.listener(|this, _, _, cx| {
                                     let last = this.visible.len() - 1;
@@ -471,8 +495,10 @@ impl MangaView {
                                     .on_click(cx.listener(|this, _, _, cx| this.toggle_library(cx))),
                             )
                             .when(installed && saved.is_some(), |d| d.child(pill("migrate", "Migrate", false).on_click(cx.listener(|_, _, _, cx| cx.emit(MangaEvent::Migrate))))),
-                    ),
             )
+            .when_some(self.text("description"), |d, t| {
+                d.child(div().text_size(u(14.)).line_height(relative(1.55)).text_color(rgb(BODY)).child(crate::rich::render(&t)))
+            })
             .into_any_element()
     }
 }
