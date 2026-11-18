@@ -3,6 +3,7 @@ mod catalog;
 mod challenge;
 mod covers;
 mod downloads;
+mod ext_settings;
 mod extensions;
 mod filters;
 mod history;

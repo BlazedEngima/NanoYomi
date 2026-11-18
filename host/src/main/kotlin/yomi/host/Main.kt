@@ -175,6 +175,8 @@ class Host {
                 Injekt.get<NetworkHelper>().userAgents.set(str("url").toHttpUrl().host, str("userAgent"))
                 JsonPrimitive(true)
             }
+            "settings" -> settingsOf(source())
+            "setSetting" -> setSetting(source(), str("key"), req["value"] ?: JsonNull)
             "cookies" -> JsonArray(Injekt.get<NetworkHelper>().cookieJar.loadForRequest(str("url").toHttpUrl()).map { JsonPrimitive("${it.name}=${it.value}") })
             else -> throw IllegalArgumentException("unknown op")
         }

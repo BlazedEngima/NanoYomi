@@ -46,6 +46,8 @@ pub struct Catalog {
     cols: usize,
     card_w: f32,
     lang: Option<String>,
+    /// An extension's settings drawer, while open.
+    settings: Option<(Entity<crate::ext_settings::ExtSettings>, Subscription)>,
     nsfw: bool,
     _subs: Vec<Subscription>,
 }
@@ -83,6 +85,7 @@ impl Catalog {
             cols: 1,
             card_w: CARD_MIN,
             lang: None,
+            settings: None,
             nsfw: false,
             _subs: subs,
         }
@@ -178,6 +181,25 @@ impl Catalog {
             .into_any_element()
     }
 
+    /// Every language the extension offers has its own settings, enabled ones first.
+    fn open_settings(&mut self, pkg: &str, cx: &mut Context<Self>) {
+        let registry = self.registry.read(cx);
+        let enabled = registry.enabled_languages(pkg, self.store.read(cx));
+        let mut infos: Vec<_> = registry.sources.iter().filter(|s| s.pkg == pkg).cloned().collect();
+        infos.sort_by_key(|s| (!enabled.contains(&s.lang), s.lang.clone()));
+        let sources: Vec<_> = infos.iter().filter_map(|s| registry.source(&s.id)).collect();
+        if sources.is_empty() {
+            return;
+        }
+        let view = cx.new(|cx| crate::ext_settings::ExtSettings::new(sources, cx));
+        let sub = cx.subscribe(&view, |this, _, _: &crate::ext_settings::Close, cx| {
+            this.settings = None;
+            cx.notify();
+        });
+        self.settings = Some((view, sub));
+        cx.notify();
+    }
+
     fn icon(&mut self, e: &Ext, size: f32, cx: &mut Context<Self>) -> AnyElement {
         let url = Some(e.icon_url.as_str()).filter(|u| !u.is_empty());
         let image = self.icons.get(&self.cache, Some(Fetch::Icon), url, |c: &mut Catalog| &mut c.icons, cx);
@@ -239,6 +261,10 @@ impl Catalog {
                 small_button(id, "Update", true).on_click(cx.listener(move |this, _, _, cx| this.registry.update(cx, |r, cx| r.install(ext.clone(), cx))))
             }
         });
+        let pkg_settings = e.pkg.clone();
+        let settings = (!registry.sources.iter().all(|s| s.pkg != e.pkg)).then(|| {
+            small_button(SharedString::from(format!("set-{}", e.pkg)), "Settings", false).on_click(cx.listener(move |this, _, _, cx| this.open_settings(&pkg_settings, cx)))
+        });
         let remove = small_button(SharedString::from(format!("rm-{}", e.pkg)), "Remove", false).on_click(cx.listener(
             move |this, _, _, cx| {
                 let pkg = pkg.clone();
@@ -282,6 +308,7 @@ impl Catalog {
                             .children(error.map(|err| div().text_size(u(13.)).text_color(rgb(ACCENT_TEXT)).child(err))),
                     )
                     .children(update)
+                    .children(settings)
                     .child(remove),
             )
             .into_any_element()
@@ -466,6 +493,7 @@ impl Render for Catalog {
 
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .child(
@@ -508,5 +536,6 @@ impl Render for Catalog {
                     .min_h_0()
                     .child(list(self.list.clone(), move |ix, _, cx| this.update(cx, |this, cx| this.item(ix, cx))).size_full()),
             )
+            .children(self.settings.as_ref().map(|(v, _)| v.clone()))
     }
 }
