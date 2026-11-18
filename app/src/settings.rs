@@ -18,6 +18,9 @@ pub struct Settings {
     sync_key: Entity<TextInput>,
     solver: Entity<TextInput>,
     new_category: Entity<TextInput>,
+    /// The tracker waiting on the browser, and what the last sign-in said.
+    signing_in: Option<i64>,
+    track_note: String,
 }
 
 impl Settings {
@@ -50,7 +53,7 @@ impl Settings {
         .detach();
         let new_category = plain("New category name", "", cx);
         cx.subscribe(&new_category, |this, _, _: &InputEvent, cx| this.add_category(cx)).detach();
-        Settings { store, covers_cleared: false, pages_cleared: false, sync_host, sync_key, solver, new_category }
+        Settings { store, covers_cleared: false, pages_cleared: false, sync_host, sync_key, solver, new_category, signing_in: None, track_note: String::new() }
     }
 
     fn add_category(&mut self, cx: &mut Context<Self>) {
@@ -61,6 +64,40 @@ impl Settings {
             cx.notify();
         });
         crate::sync::run(self.store.clone(), cx);
+    }
+
+    /// Opens the site's sign-in page and waits on its own thread for the browser to come back.
+    fn sign_in(&mut self, tracker: i64, cx: &mut Context<Self>) {
+        let (url, state, verifier) = match crate::track::login_url(tracker) {
+            Ok(x) => x,
+            Err(e) => {
+                self.track_note = e;
+                return cx.notify();
+            }
+        };
+        let (tx, rx) = futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::track::finish_login(tracker, &state, &verifier));
+        });
+        cx.open_url(&url);
+        self.signing_in = Some(tracker);
+        self.track_note = format!("Finish signing in to {} in your browser…", crate::track::name(tracker));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err("Signing in stopped.".into()));
+            let _ = this.update(cx, |this, cx| {
+                this.signing_in = None;
+                this.track_note = match result {
+                    Ok(login) => {
+                        this.store.update(cx, |s, cx| s.set_login(tracker, Some(login), cx));
+                        String::new()
+                    }
+                    Err(e) => e,
+                };
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn sync_now(&mut self, cx: &mut Context<Self>) {
@@ -309,6 +346,41 @@ impl Render for Settings {
                     .child(small_button("sync-now", "Sync now", true).on_click(cx.listener(|this, _, _, cx| this.sync_now(cx)))),
             );
 
+        let trackers = crate::track::TRACKERS.into_iter().filter(|t| crate::track::configured(*t)).map(|tracker| {
+            let user = self.store.read(cx).login(tracker).map(|l| l.user.clone());
+            let waiting = self.signing_in == Some(tracker);
+            let note = match &user {
+                Some(name) => format!("Signed in as {name}"),
+                None if waiting => "Waiting for the browser…".into(),
+                None => "Not signed in".into(),
+            };
+            let button = match user {
+                Some(_) => small_button(("tracker-out", tracker as usize), "Sign out", false).on_click(cx.listener(move |this, _, _, cx| {
+                    this.store.update(cx, |s, cx| s.set_login(tracker, None, cx))
+                })),
+                None => small_button(("tracker-in", tracker as usize), "Sign in", true).on_click(cx.listener(move |this, _, _, cx| this.sign_in(tracker, cx))),
+            };
+            div()
+                .py(u(12.))
+                .flex()
+                .items_center()
+                .gap_4()
+                .border_b_1()
+                .border_color(rgb(RULE))
+                .child(div().flex_1().min_w_0().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child(crate::track::name(tracker)))
+                .child(div().font_family(MONO).text_size(u(12.)).text_color(rgb(FAINT)).child(note))
+                .child(button)
+        });
+        let tracking = div()
+            .w_full()
+            .border_t_1()
+            .border_color(rgb(RULE))
+            .children(trackers)
+            .when(!self.track_note.is_empty(), |d| d.child(div().pt(u(10.)).text_size(u(13.)).text_color(rgb(ACCENT_TEXT)).child(self.track_note.clone())))
+            .child(div().pt(u(10.)).text_size(u(13.)).text_color(rgb(MUTED)).child(
+                "Link a series from its page under Tracking. Chapters you read in Nano then count on your list there.",
+            ));
+
         div()
             .id("settings")
             .size_full()
@@ -325,6 +397,8 @@ impl Render for Settings {
             .child(categories)
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("DOWNLOADS"))
             .child(downloads)
+            .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("TRACKING"))
+            .child(tracking)
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("SYNC"))
             .child(sync)
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("CLOUDFLARE"))

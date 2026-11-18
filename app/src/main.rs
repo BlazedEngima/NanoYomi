@@ -25,6 +25,8 @@ mod sidebar;
 mod solver;
 mod store;
 mod sync;
+mod track;
+mod tracking;
 mod webviews;
 
 use browse::{Browse, OpenManga};

@@ -32,6 +32,30 @@ pub struct Series {
     /// The categories it's in, by their `order`, as Mihon's backup does.
     #[serde(default)]
     pub categories: Vec<i64>,
+    /// Tracker entries, as Mihon's backup keeps them.
+    #[serde(default)]
+    pub tracks: Vec<Track>,
+}
+
+/// A series on MyAnimeList or AniList. Mihon's BackupTracking fields, so sync carries them unchanged.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+#[serde(default)]
+pub struct Track {
+    /// Mihon's tracker id: 1 MyAnimeList, 2 AniList.
+    pub tracker: i64,
+    /// AniList's list entry id. MyAnimeList has none.
+    pub library_id: i64,
+    pub media_id: i64,
+    pub url: String,
+    pub title: String,
+    pub last_read: f32,
+    pub total: i64,
+    /// 0 to 10 on MyAnimeList, 0 to 100 on AniList.
+    pub score: f32,
+    pub status: i64,
+    pub started: i64,
+    pub finished: i64,
+    pub private: bool,
 }
 
 /// A library shelf. Mihon's backup fields, so phones and Nano agree on them through sync.
@@ -72,6 +96,7 @@ impl Series {
             marks: Default::default(),
             bookmarks: Default::default(),
             categories: vec![],
+            tracks: vec![],
         }
     }
 
@@ -157,6 +182,13 @@ impl Series {
         }
     }
 
+    /// The highest chapter number read, which is what trackers count.
+    pub fn read_number(&self) -> f32 {
+        let list = self.visible();
+        let read = self.read_flags(&list);
+        list.iter().zip(read).filter(|(_, r)| *r).filter_map(|(c, _)| c["chapterNumber"].as_f64()).fold(0., |a, n| a.max(n as f32))
+    }
+
     pub fn toggle_bookmark(&mut self, url: &str) {
         if !self.bookmarks.remove(url) {
             self.bookmarks.insert(url.to_string());
@@ -229,6 +261,9 @@ struct Data {
     /// Names deleted here, so a sync doesn't bring them back. Mihon's backup has no way to say "deleted".
     #[serde(default)]
     deleted_categories: Vec<String>,
+    /// Tracker sign-ins, by Mihon's tracker id.
+    #[serde(default)]
+    trackers: std::collections::BTreeMap<i64, crate::track::Login>,
 }
 
 #[derive(Clone)]
@@ -244,6 +279,8 @@ pub struct Store {
     data: Data,
     saving: bool,
     pub sync_status: SyncStatus,
+    /// The last tracker update that failed, shown on the series page.
+    pub track_error: Option<String>,
 }
 
 pub fn now_ms() -> i64 {
@@ -256,7 +293,7 @@ impl Store {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).map_err(|e| eprintln!("{}: {e}", path.display())).ok())
             .unwrap_or_default();
-        Store { path, data, saving: false, sync_status: SyncStatus::Idle }
+        Store { path, data, saving: false, sync_status: SyncStatus::Idle, track_error: None }
     }
 
     pub fn get(&self, source: &str, url: &str) -> Option<&Series> {
@@ -291,7 +328,21 @@ impl Store {
                 self.data.series.len() - 1
             }
         };
+        let before = self.data.series[ix].read_number();
         let out = f(&mut self.data.series[ix]);
+        let s = &mut self.data.series[ix];
+        let after = s.read_number();
+        if after > before {
+            let now = now_ms();
+            let moved: Vec<usize> = (0..s.tracks.len()).filter(|&i| crate::track::advance(&mut s.tracks[i], after, now)).collect();
+            if !moved.is_empty() {
+                let key = (s.source.clone(), s.url().to_string());
+                for i in moved {
+                    let t = self.data.series[ix].tracks[i].clone();
+                    self.push_track(key.clone(), t, cx);
+                }
+            }
+        }
         self.data.series.retain(Series::kept);
         self.save_soon(cx);
         cx.notify();
@@ -456,6 +507,63 @@ impl Store {
         if sent {
             self.data.categories_changed = false;
         }
+    }
+
+    pub fn login(&self, tracker: i64) -> Option<&crate::track::Login> {
+        self.data.trackers.get(&tracker)
+    }
+
+    pub fn set_login(&mut self, tracker: i64, login: Option<crate::track::Login>, cx: &mut Context<Self>) {
+        match login {
+            Some(l) => self.data.trackers.insert(tracker, l),
+            None => self.data.trackers.remove(&tracker),
+        };
+        self.save_soon(cx);
+        cx.notify();
+    }
+
+    /// Saves a track and sends it, refreshing the sign-in first if needed.
+    pub fn push_track(&mut self, key: (String, String), mut t: Track, cx: &mut Context<Self>) {
+        let Some(mut login) = self.login(t.tracker).cloned() else { return };
+        self.put_track(&key, t.clone(), cx);
+        cx.spawn(async move |this, cx| {
+            let tracker = t.tracker;
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let refreshed = crate::track::refresh(tracker, &mut login)?;
+                    crate::track::push(&login, &mut t)?;
+                    Ok::<_, String>((t, refreshed.then_some(login)))
+                })
+                .await;
+            let _ = this.update(cx, |store, cx| match result {
+                Ok((t, login)) => {
+                    if let Some(l) = login {
+                        store.set_login(tracker, Some(l), cx);
+                    }
+                    store.put_track(&key, t, cx);
+                    store.track_error = None;
+                }
+                Err(e) => {
+                    eprintln!("{}: {e}", crate::track::name(tracker));
+                    store.track_error = Some(format!("{}: {e}", crate::track::name(tracker)));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Replaces or adds a series' entry for that tracker, or removes it when `t.media_id` is 0.
+    pub fn put_track(&mut self, key: &(String, String), t: Track, cx: &mut Context<Self>) {
+        self.edit_series(cx, |series| {
+            if let Some(s) = series.iter_mut().find(|s| s.source == key.0 && s.url() == key.1) {
+                s.tracks.retain(|x| x.tracker != t.tracker);
+                if t.media_id != 0 {
+                    s.tracks.push(t);
+                }
+            }
+        });
     }
 
     pub fn auto_download(&self) -> bool {

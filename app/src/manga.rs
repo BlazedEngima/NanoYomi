@@ -66,6 +66,8 @@ pub struct MangaView {
     cat_closed: Option<std::time::Instant>,
     /// The chapter whose actions menu is open, and where.
     row_menu: Option<(usize, gpui::Point<gpui::Pixels>)>,
+    /// The trackers drawer, over the panel while open.
+    tracking: Option<Entity<crate::tracking::Tracking>>,
     _subs: Vec<Subscription>,
 }
 
@@ -143,6 +145,7 @@ impl MangaView {
             cat_menu: false,
             cat_closed: None,
             downloaded,
+            tracking: None,
             status: status.into(),
             _subs: subs,
         }
@@ -221,6 +224,18 @@ impl MangaView {
         self.save(cx, f);
         self.row_menu = None;
         crate::sync::run(self.store.clone(), cx);
+        cx.notify();
+    }
+
+    fn open_tracking(&mut self, cx: &mut Context<Self>) {
+        let key = (self.source.id.clone(), self.url().to_string());
+        let (store, title) = (self.store.clone(), self.title());
+        let view = cx.new(|cx| crate::tracking::Tracking::new(store, key, title, cx));
+        self._subs.push(cx.subscribe(&view, |this, _, _: &crate::tracking::Close, cx| {
+            this.tracking = None;
+            cx.notify();
+        }));
+        self.tracking = Some(view);
         cx.notify();
     }
 
@@ -759,6 +774,14 @@ impl MangaView {
                                     .on_click(cx.listener(|this, _, _, cx| this.toggle_library(cx))),
                             )
                             .when(in_library, |d| d.child(self.categories_button(cx)))
+                            .when(in_library, |d| {
+                                let tracked = saved.as_ref().is_some_and(|s| !s.tracks.is_empty());
+                                d.child(
+                                    pill("tracking", if tracked { "Tracked" } else { "Tracking" }, false)
+                                        .when(tracked, |d| d.gap_2().child(crate::check(16., TEXT)).flex_row_reverse())
+                                        .on_click(cx.listener(|this, _, _, cx| this.open_tracking(cx))),
+                                )
+                            })
                             .when(installed && saved.is_some(), |d| d.child(pill("migrate", "Migrate", false).on_click(cx.listener(|_, _, _, cx| cx.emit(MangaEvent::Migrate))))),
             )
             .when_some(self.text("description"), |d, t| {
@@ -803,10 +826,12 @@ impl Render for MangaView {
         let this = cx.entity();
         let menu = self.row_menu(cx);
         div()
+            .relative()
             .size_full()
             .pb(u(24.))
             .child(list(self.list.clone(), move |ix, _, cx| this.update(cx, |this, cx| this.item(ix, cx))).size_full())
             .children(menu)
+            .children(self.tracking.clone())
     }
 }
 

@@ -1,6 +1,6 @@
 //! SyncYomi sync. Nano only changes its own fields, so everything else on the server survives.
 
-use crate::store::{Progress, Series, Store, now_ms};
+use crate::store::{Progress, Series, Store, Track, now_ms};
 use gpui::{App, Entity};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -33,6 +33,8 @@ struct Snapshot {
     bookmarks: std::collections::BTreeSet<String>,
     #[serde(default)]
     categories: Vec<i64>,
+    #[serde(default)]
+    tracks: Vec<Track>,
 }
 
 impl Snapshot {
@@ -43,6 +45,7 @@ impl Snapshot {
             marks: s.marks.clone(),
             bookmarks: s.bookmarks.clone(),
             categories: s.categories.clone(),
+            tracks: s.tracks.clone(),
         }
     }
 }
@@ -56,7 +59,7 @@ fn dirty(s: &Series) -> bool {
     !s.url().is_empty()
         && match &s.sync {
             Some(m) => m.sent != Snapshot::of(s),
-            None => s.in_library || s.progress.is_some() || !s.marks.is_empty() || !s.bookmarks.is_empty(),
+            None => s.in_library || s.progress.is_some() || !s.marks.is_empty() || !s.bookmarks.is_empty() || !s.tracks.is_empty(),
         }
 }
 
@@ -260,6 +263,20 @@ const C_NUMBER: u32 = 9;
 const C_ORDER: u32 = 10;
 const C_MODIFIED: u32 = 11;
 const C_VERSION: u32 = 12;
+const M_TRACKING: u32 = 18;
+const T_SYNC_ID: u32 = 1;
+const T_LIBRARY_ID: u32 = 2;
+const T_MEDIA_ID_INT: u32 = 3;
+const T_URL: u32 = 4;
+const T_TITLE: u32 = 5;
+const T_LAST_READ: u32 = 6;
+const T_TOTAL: u32 = 7;
+const T_SCORE: u32 = 8;
+const T_STATUS: u32 = 9;
+const T_STARTED: u32 = 10;
+const T_FINISHED: u32 = 11;
+const T_PRIVATE: u32 = 12;
+const T_MEDIA_ID: u32 = 100;
 const H_URL: u32 = 1;
 const H_READ_AT: u32 = 2;
 
@@ -359,6 +376,22 @@ fn outgoing(s: &Series, raw: Option<Raw>, now: i64) -> (Msg, Raw) {
         m.set_int(M_VERSION, m.int(M_VERSION) + 1);
         m.set_int(M_MODIFIED, secs);
     }
+    if old.map_or(!s.tracks.is_empty(), |o| o.tracks != s.tracks) {
+        let m = &mut raw.manga;
+        let entries: Vec<Msg> = m.all(M_TRACKING).filter_map(Msg::parse).collect();
+        // Trackers Nano doesn't handle (Kitsu and the rest) go back as they came.
+        let mut kept: Vec<Msg> = entries.iter().filter(|e| !crate::track::TRACKERS.contains(&e.int(T_SYNC_ID))).cloned().collect();
+        for t in &s.tracks {
+            let old = entries.iter().find(|e| e.int(T_SYNC_ID) == t.tracker).cloned().unwrap_or_default();
+            kept.push(track_msg(old, t));
+        }
+        *m = m.without(&[M_TRACKING]);
+        for e in &kept {
+            m.push(M_TRACKING, e);
+        }
+        m.set_int(M_VERSION, m.int(M_VERSION) + 1);
+        m.set_int(M_MODIFIED, secs);
+    }
     let mut out = raw.manga.clone();
     // Same fields as Mihon's backup: read (4), bookmark (5) and last page read (6), each with a version bump.
     let visible = s.visible();
@@ -405,6 +438,43 @@ fn outgoing(s: &Series, raw: Option<Raw>, now: i64) -> (Msg, Raw) {
         out.push(M_HISTORY, &h);
     }
     (out, raw)
+}
+
+/// A track over the server's entry for it, so fields Nano doesn't know survive.
+fn track_msg(old: Msg, t: &Track) -> Msg {
+    let mut e = old.without(&[T_MEDIA_ID_INT]);
+    e.set_int(T_SYNC_ID, t.tracker);
+    e.set_int(T_LIBRARY_ID, t.library_id);
+    e.set_str(T_URL, &t.url);
+    e.set_str(T_TITLE, &t.title);
+    e.set(T_LAST_READ, Val::Fixed32(t.last_read.to_bits()));
+    e.set_int(T_TOTAL, t.total);
+    e.set(T_SCORE, Val::Fixed32(t.score.to_bits()));
+    e.set_int(T_STATUS, t.status);
+    e.set_int(T_STARTED, t.started);
+    e.set_int(T_FINISHED, t.finished);
+    e.set_int(T_PRIVATE, t.private as i64);
+    e.set_int(T_MEDIA_ID, t.media_id);
+    e
+}
+
+fn track_of(e: &Msg) -> Track {
+    // Old backups put the id in field 3.
+    let media_id = if e.int(T_MEDIA_ID_INT) != 0 { e.int(T_MEDIA_ID_INT) } else { e.int(T_MEDIA_ID) };
+    Track {
+        tracker: e.int(T_SYNC_ID),
+        library_id: e.int(T_LIBRARY_ID),
+        media_id,
+        url: e.str(T_URL),
+        title: e.str(T_TITLE),
+        last_read: e.f32(T_LAST_READ),
+        total: e.int(T_TOTAL),
+        score: e.f32(T_SCORE),
+        status: e.int(T_STATUS),
+        started: e.int(T_STARTED),
+        finished: e.int(T_FINISHED),
+        private: e.bool(T_PRIVATE).unwrap_or(false),
+    }
 }
 
 /// Takes a server series into Nano. The newer reading position wins.
@@ -472,9 +542,11 @@ fn incoming(series: &mut Vec<Series>, m: &Msg, raw: Option<Raw>, source_names: &
         }
     }
     s.categories = m.ints(M_CATEGORIES);
+    s.tracks = m.all(M_TRACKING).filter_map(Msg::parse).map(|e| track_of(&e)).filter(|t| crate::track::TRACKERS.contains(&t.tracker) && t.media_id != 0).collect();
     let meta = s.sync.get_or_insert_with(Meta::default);
     meta.sent.in_library = favorite;
     meta.sent.categories = s.categories.clone();
+    meta.sent.tracks = s.tracks.clone();
     meta.sent.marks = s.marks.clone();
     meta.sent.bookmarks = s.bookmarks.clone();
     if let Some(p) = server {
@@ -754,6 +826,41 @@ mod tests {
         assert!(by("/c3").is_none());
         let hist = Msg::parse(out.all(M_HISTORY).next().unwrap()).unwrap();
         assert_eq!((hist.str(H_URL), hist.int(H_READ_AT)), ("/c2".into(), 4000));
+    }
+
+    #[test]
+    fn tracks_use_mihons_tracking_field() {
+        // The phone tracks it on MyAnimeList (with a field Nano doesn't know) and on Kitsu.
+        let mut mal = Msg::default();
+        mal.set_int(T_SYNC_ID, 1);
+        mal.set_int(T_MEDIA_ID, 2);
+        mal.set(T_LAST_READ, Val::Fixed32(4f32.to_bits()));
+        mal.set_int(T_STATUS, 1);
+        mal.set_int(500, 7);
+        let mut kitsu = Msg::default();
+        kitsu.set_int(T_SYNC_ID, 3);
+        kitsu.set_int(T_MEDIA_ID, 9);
+        let mut m = new_manga(&series());
+        m.set_int(M_VERSION, 3);
+        m.push(M_TRACKING, &mal);
+        m.push(M_TRACKING, &kitsu);
+        let mut list = vec![];
+        let (_, raw) = incoming(&mut list, &m, None, &HashMap::new()).unwrap();
+        let s = &mut list[0];
+        assert_eq!(s.tracks.len(), 1, "only the trackers Nano handles");
+        assert_eq!((s.tracks[0].media_id, s.tracks[0].last_read), (2, 4.));
+        assert!(!dirty(s));
+
+        s.tracks[0].last_read = 6.;
+        s.tracks.push(Track { tracker: 2, media_id: 30, status: 5, ..Track::default() });
+        let (out, _) = outgoing(s, Some(raw), 5000);
+        assert_eq!(out.int(M_VERSION), 4);
+        let sent: Vec<Msg> = out.all(M_TRACKING).filter_map(Msg::parse).collect();
+        let by = |id: i64| sent.iter().find(|e| e.int(T_SYNC_ID) == id).cloned().unwrap();
+        assert_eq!(sent.len(), 3);
+        assert_eq!((by(1).f32(T_LAST_READ), by(1).int(500)), (6., 7), "unknown field kept");
+        assert_eq!(by(3), kitsu);
+        assert_eq!((by(2).int(T_MEDIA_ID), by(2).int(T_STATUS)), (30, 5));
     }
 
     #[test]
