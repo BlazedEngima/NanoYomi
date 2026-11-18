@@ -6,7 +6,7 @@ use crate::covers::{CARD_H, CARD_W, Covers, Fetch, cover, grid};
 use crate::images::ImageCache;
 use crate::registry::Registry;
 use crate::store::{Series, Store, ago, now_ms};
-use crate::browse::segment;
+use crate::segmented::Segmented;
 use crate::{ACCENT, ACCENT_TEXT, FAINT, LINE, MONO, MUTED, RULE, SURFACE, Source, TEXT, heading, pill};
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement, ListAlignment, ListState,
@@ -108,6 +108,8 @@ pub struct Library {
     sort: Sort,
     as_list: bool,
     relayout: bool,
+    filter_switch: Segmented,
+    layout_switch: Segmented,
     sort_open: bool,
     sort_closed: Option<std::time::Instant>,
     kept: usize,
@@ -134,7 +136,12 @@ impl Library {
                 cx.notify();
             }),
         ];
+        let as_list = std::env::var("NANO_LIBRARY").as_deref() == Ok("list");
+        let filter_switch = Segmented::new(&["All", "New chapters", "Caught up"], 0);
+        let layout_switch = Segmented::new(&["Grid", "List"], usize::from(as_list));
         Library {
+            filter_switch,
+            layout_switch,
             updates_page: false,
             page_seen: false,
             store,
@@ -157,7 +164,7 @@ impl Library {
             filter: Filter::All,
             sort: Sort::LastRead,
             // NANO_LIBRARY=list starts in the list view (for testing).
-            as_list: std::env::var("NANO_LIBRARY").as_deref() == Ok("list"),
+            as_list,
             relayout: false,
             sort_open: false,
             sort_closed: None,
@@ -358,23 +365,6 @@ impl Library {
     }
 
     fn controls(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let group = || div().flex().gap_1().p_1().rounded(u(20.)).border_1().border_color(rgb(LINE));
-        let filter = self.filter;
-        let filters = [(Filter::All, "All"), (Filter::New, "New chapters"), (Filter::Done, "Caught up")].map(|(f, label)| {
-            segment(label, label, filter == f).on_click(cx.listener(move |this, _, _, cx| {
-                this.filter = f;
-                this.relayout = true;
-                cx.notify();
-            }))
-        });
-        let as_list = self.as_list;
-        let layouts = [(false, "Grid"), (true, "List")].map(|(l, label)| {
-            segment(label, label, as_list == l).on_click(cx.listener(move |this, _, _, cx| {
-                this.as_list = l;
-                this.relayout = true;
-                cx.notify();
-            }))
-        });
         div()
             .w_full()
             .px(u(PAD))
@@ -384,9 +374,19 @@ impl Library {
             .items_center()
             .gap(u(10.))
             .child(Self::section_title("EVERYTHING"))
-            .child(div().ml_auto().flex().flex_wrap().gap(u(10.)).child(group().children(filters))
+            .child(div().ml_auto().flex().flex_wrap().gap(u(10.)).child(self.filter_switch.render("filter", cx.listener(|this, i: &usize, _, cx| {
+                this.filter_switch.pick(*i);
+                this.filter = [Filter::All, Filter::New, Filter::Done][*i];
+                this.relayout = true;
+                cx.notify();
+            })))
             .child(self.sort_menu(cx))
-            .child(group().children(layouts)))
+            .child(self.layout_switch.render("layout", cx.listener(|this, i: &usize, _, cx| {
+                this.layout_switch.pick(*i);
+                this.as_list = *i == 1;
+                this.relayout = true;
+                cx.notify();
+            }))))
             .into_any_element()
     }
 

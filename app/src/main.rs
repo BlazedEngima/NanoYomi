@@ -16,6 +16,7 @@ mod palette;
 mod reader;
 mod registry;
 mod rich;
+mod segmented;
 mod settings;
 mod sidebar;
 mod solver;

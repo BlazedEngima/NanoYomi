@@ -6,6 +6,7 @@ use crate::covers::{CARD_H, CARD_W, Covers, Fetch, cover, grid};
 use crate::filters::{self, Path};
 use crate::images::ImageCache;
 use crate::input::{InputEvent, TextInput};
+use crate::segmented::Segmented;
 use crate::registry::Registry;
 use crate::store::Store;
 use crate::{BG, HOVER, LINE, MUTED, SURFACE, Source, TEXT, heading};
@@ -38,6 +39,9 @@ pub struct Browse {
     store: Entity<Store>,
     cache: Entity<ImageCache>,
     pub search: Entity<TextInput>,
+    listing_switch: Segmented,
+    /// What each option in the switch stands for, since Latest and Search come and go.
+    listings: Vec<Listing>,
     source: Option<Source>,
     listing: Listing,
     query: String,
@@ -64,6 +68,7 @@ impl EventEmitter<OpenManga> for Browse {}
 impl Browse {
     pub fn new(registry: Entity<Registry>, store: Entity<Store>, cache: Entity<ImageCache>, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| TextInput::new("Search this source…", cx));
+        let listing_switch = Segmented::new(&["Popular", "Latest"], 0);
         let subs = vec![
             cx.subscribe(&search, |this, input, _: &InputEvent, cx| {
                 this.query = input.read(cx).text.trim().to_string();
@@ -79,6 +84,8 @@ impl Browse {
             store,
             cache,
             search,
+            listing_switch,
+            listings: vec![Listing::Popular, Listing::Latest],
             source: None,
             listing: Listing::Popular,
             query: String::new(),
@@ -309,6 +316,17 @@ impl Render for Browse {
         };
         let listing = self.listing;
         let supports_latest = registry.sources.iter().find(|s| Some(&s.id) == selected.as_ref()).is_none_or(|s| s.supports_latest);
+        let mut options = vec![(Listing::Popular, "Popular")];
+        if supports_latest {
+            options.push((Listing::Latest, "Latest"));
+        }
+        if listing == Listing::Search {
+            options.push((Listing::Search, "Search"));
+        }
+        self.listings = options.iter().map(|(l, _)| *l).collect();
+        let labels: Vec<&str> = options.iter().map(|(_, l)| *l).collect();
+        let at = self.listings.iter().position(|l| *l == listing).unwrap_or(0);
+        self.listing_switch.set(&labels, at);
 
         let drawer = self.filters_open.then(|| {
             let body = filters::list(&self.filters, &self.filter_inputs, cx);
@@ -360,29 +378,23 @@ impl Render for Browse {
                     .items_end()
                     .gap_4()
                     .child(div().flex_none().max_w_full().child(heading(&title, note)))
-                    .child(
-                        div()
-                            .ml_auto()
-                            .flex()
-                            .gap_1()
-                            .p_1()
-                            .rounded(u(20.))
-                            .border_1()
-                            .border_color(rgb(LINE))
-                            .child(segment("popular", "Popular", listing == Listing::Popular).on_click(cx.listener(|this, _, _, cx| this.show(Listing::Popular, cx))))
-                            .when(supports_latest, |d| {
-                                d.child(segment("latest", "Latest", listing == Listing::Latest).on_click(cx.listener(|this, _, _, cx| this.show(Listing::Latest, cx))))
-                            })
-                            .when(listing == Listing::Search, |d| d.child(segment("search", "Search", true)))
-                            .when(!self.filters.is_empty(), |d| {
-                                let n = filters::changed(&self.filters, &self.filter_defaults);
-                                let label = if n > 0 { format!("Filters · {n}") } else { "Filters".into() };
-                                d.child(segment("filters", label, self.filters_open).on_click(cx.listener(|this, _, _, cx| {
-                                    this.filters_open = !this.filters_open;
-                                    cx.notify();
-                                })))
-                            }),
-                    )
+                    .child(div().ml_auto().flex().gap_2().child(self.listing_switch.render("listing", cx.listener(|this, i: &usize, _, cx| {
+                        this.listing_switch.pick(*i);
+                        if let Some(&listing) = this.listings.get(*i)
+                            && listing != Listing::Search
+                        {
+                            this.show(listing, cx);
+                        }
+                    }))).when(!self.filters.is_empty(), |d| {
+                        let n = filters::changed(&self.filters, &self.filter_defaults);
+                        let label = if n > 0 { format!("Filters · {n}") } else { "Filters".into() };
+                        d.child(
+                            div().p_1().rounded(u(20.)).border_1().border_color(rgb(LINE)).child(segment("filters", label, self.filters_open).on_click(cx.listener(|this, _, _, cx| {
+                                this.filters_open = !this.filters_open;
+                                cx.notify();
+                            }))),
+                        )
+                    }))
                     .child(div().w(u(300.)).max_w_full().child(self.search.clone())),
             )
             .when(self.failed, |d| {
