@@ -52,7 +52,7 @@ impl Segmented {
             let to = spots[self.selected.min(spots.len() - 1)];
             let from = self.from.unwrap_or(to);
             div().absolute().top_0().bottom_0().rounded(u(16.)).bg(rgb(TEXT)).with_animation(
-                (id, self.moves),
+                SharedString::from(format!("{id}-slide-{}", self.moves)),
                 Animation::new(Duration::from_millis(200)).with_easing(gpui::ease_out_quint()),
                 move |d, t| d.left(px(from.0 + (to.0 - from.0) * t)).w(px(from.1 + (to.1 - from.1) * t)),
             )
@@ -67,7 +67,7 @@ impl Segmented {
             let on = i == self.selected;
             let on_pick = on_pick.clone();
             let item = div()
-                .id((id, i))
+                .id(SharedString::from(format!("{id}-option-{i}")))
                 .h(u(32.))
                 .px(u(14.))
                 .rounded(u(16.))
@@ -84,7 +84,7 @@ impl Segmented {
                 .when(!on, |d| d.on_click(move |_, window, cx| on_pick(&i, window, cx)));
             match (slide, spots.get(i).copied()) {
                 (Some(slide), Some((x, w))) => item
-                    .with_animation((id, i + 1000 * self.moves), Animation::new(Duration::from_millis(200)).with_easing(gpui::ease_out_quint()), move |d, t| {
+                    .with_animation(SharedString::from(format!("{id}-label-{i}-{}", self.moves)), Animation::new(Duration::from_millis(200)).with_easing(gpui::ease_out_quint()), move |d, t| {
                         let (left, width) = slide(t);
                         let middle = x + w / 2.;
                         if middle > left && middle < left + width { d.text_color(rgb(BG)) } else { d.text_color(rgb(if on { TEXT } else { MUTED })) }
