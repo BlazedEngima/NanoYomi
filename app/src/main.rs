@@ -1,5 +1,4 @@
 mod browse;
-mod byparr;
 mod catalog;
 mod challenge;
 mod covers;
@@ -17,6 +16,7 @@ mod reader;
 mod registry;
 mod rich;
 mod settings;
+mod solver;
 mod store;
 mod sync;
 mod webviews;
@@ -160,7 +160,7 @@ impl Source {
 // One lock for all sites. Per-host locks if two sites often challenge at once.
 static SOLVING: async_lock::Mutex<()> = async_lock::Mutex::new(());
 
-/// Calls the host, and on a Cloudflare check solves it (with Byparr if it's running) and retries once.
+/// Calls the host, and on a Cloudflare check solves it (with the user's solver if one is set) and retries once.
 pub async fn call(host: &Arc<Host>, cx: &mut AsyncApp, op: &str, params: Value) -> Result<Value, String> {
     match host.call(op, params.clone()).await {
         Err(HostError::Challenge { .. }) => {
@@ -170,21 +170,23 @@ pub async fn call(host: &Arc<Host>, cx: &mut AsyncApp, op: &str, params: Value) 
                 Err(HostError::Challenge { url, user_agent }) => (url, user_agent),
                 other => return other.map_err(|e| e.to_string()),
             };
-            let base = byparr::base_url();
-            let attempt = {
-                let (base, url) = (base.clone(), url.clone());
-                cx.background_executor().spawn(async move { if byparr::running(&base) { Some(byparr::solve(&base, &url)) } else { None } }).await
+            let attempt = match solver::url() {
+                Some(base) => {
+                    let url = url.clone();
+                    cx.background_executor().spawn(async move { solver::running(&base).then(|| solver::solve(&base, &url)) }).await
+                }
+                None => None,
             };
             match attempt {
                 Some(Ok(solved)) => {
                     let _ = host.set_cookies(&url, solved.cookies).await;
                     let _ = host.call("setUserAgent", serde_json::json!({ "url": url, "userAgent": solved.user_agent })).await;
                     match host.call(op, params.clone()).await {
-                        Err(HostError::Challenge { .. }) => eprintln!("Byparr's cookies didn't pass {url}; trying the webview"),
+                        Err(HostError::Challenge { .. }) => eprintln!("The solver's cookies didn't pass {url}, trying the webview"),
                         other => return other.map_err(|e| e.to_string()),
                     }
                 }
-                Some(Err(e)) => eprintln!("{e}; trying the webview"),
+                Some(Err(e)) => eprintln!("{e}, trying the webview"),
                 None => {}
             }
             let solved = cx.update(|cx| challenge::solve(cx, host.clone(), url, challenge::browser_user_agent(user_agent)));
@@ -239,7 +241,6 @@ struct Root {
     catalog: Option<Entity<Catalog>>,
     history: Option<Entity<History>>,
     settings: Option<Entity<settings::Settings>>,
-    byparr: Entity<byparr::Service>,
     manga: Option<(Entity<MangaView>, Subscription)>,
     migrate: Option<(Entity<migrate::Migrate>, Subscription)>,
     reader: Option<(Entity<Reader>, Subscription)>,
@@ -254,11 +255,10 @@ impl Root {
         sync::run(store.clone(), cx);
         set_zoom(store.read(cx).zoom());
         page_cache::set_cap_mb(store.read(cx).page_cache_mb());
+        solver::set_url(store.read(cx).solver_url());
         let registry = cx.new(|cx| Registry::new(host, data_dir.clone(), cx));
         let library = cx.new(|cx| Library::new(store.clone(), registry.clone(), cache.clone(), cx));
         let browse = cx.new(|cx| Browse::new(registry.clone(), store.clone(), cache.clone(), cx));
-        let autostart = store.read(cx).byparr_autostart();
-        let byparr = cx.new(|cx| byparr::Service::new(&data_dir, autostart, cx));
         let subs = vec![
             cx.subscribe_in(&browse, window, |this, _, ev: &OpenManga, window, cx| this.open_manga(ev, window, cx)),
             cx.subscribe_in(&library, window, |this, _, ev: &OpenManga, window, cx| this.open_manga(ev, window, cx)),
@@ -271,10 +271,10 @@ impl Root {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let settings = (tab == Tab::Settings).then(|| {
-            let (store, byparr) = (store.clone(), byparr.clone());
-            cx.new(|cx| settings::Settings::new(store, byparr, cx))
+            let store = store.clone();
+            cx.new(|cx| settings::Settings::new(store, cx))
         });
-        Root { cache, store, registry, tab, library, browse, catalog: None, history: None, settings, byparr, manga: None, migrate: None, reader: None, focus, _subs: subs }
+        Root { cache, store, registry, tab, library, browse, catalog: None, history: None, settings, manga: None, migrate: None, reader: None, focus, _subs: subs }
     }
 
     fn zoom_by(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -301,8 +301,8 @@ impl Root {
                 self.history = Some(history);
             }
             Tab::Settings if self.settings.is_none() => {
-                let (store, byparr) = (self.store.clone(), self.byparr.clone());
-                self.settings = Some(cx.new(|cx| settings::Settings::new(store, byparr, cx)));
+                let store = self.store.clone();
+                self.settings = Some(cx.new(|cx| settings::Settings::new(store, cx)));
             }
             _ => {}
         }

@@ -27,7 +27,7 @@ Features of Nano include:
 * Per-series scanlator filters, and per-extension language choices for multi-language sources.
 * Migration to another source, as in Mihon. Reading progress carries over by chapter number. Series stay readable from what was saved even after their extension is removed.
 * History as a grid of covers, with the chapter and page you stopped at.
-* Cloudflare checks solved in a built-in browser window, or automatically with [Byparr](https://github.com/ThePhaseless/Byparr), which Settings can download and run in Docker.
+* Cloudflare checks passed quietly in the built-in web engine, with a window to click only when a site insists. A FlareSolverr or Byparr you already run can be added in Settings.
 * Covers cached for a week and chapter pages cached up to a size you choose, so going back doesn't download them again.
 * Descriptions rendered from Markdown or HTML, with clickable links.
 * JPEG XL pages (used by some sources).
@@ -51,7 +51,6 @@ cd ../app && cargo run --release
 Environment variables:
 * `NANO_HOST`: path to the extension host launcher, if it isn't the dev build in `host/`.
 * `NANO_DATA`: where Nano keeps its library, extensions and caches.
-* `NANO_BYPARR`: address of a Byparr you run yourself (default `http://localhost:8191`).
 
 macOS is the most complete platform. On Windows and Linux the app builds and plain extensions work. Extensions that drive a hidden WebView rely on WebKit calls that are only wired up on macOS so far.
 

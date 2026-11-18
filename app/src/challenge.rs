@@ -1,4 +1,4 @@
-//! Cloudflare checks: show the page in the system web view, then hand its cookies to the extension host.
+//! Cloudflare checks: pass them in a hidden system web view, then hand its cookies to the extension host.
 
 use crate::host::Host;
 use futures::channel::oneshot;
@@ -17,6 +17,8 @@ const PAGE_PASSED_JS: &str = r#"(() => {
 })()"#;
 
 const TIMEOUT: Duration = Duration::from_secs(120);
+/// Most checks pass on their own by now. After this the window shows so you can click.
+const SHOW_AFTER: Duration = Duration::from_secs(12);
 
 struct Challenge {
     webview: wry::WebView,
@@ -38,6 +40,7 @@ pub fn solve(cx: &mut App, host: Arc<Host>, url: String, user_agent: String) -> 
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(480.), px(680.)), cx))),
         titlebar: Some(TitlebarOptions { title: Some("Verify to continue".into()), ..Default::default() }),
+        focus: false,
         ..Default::default()
     };
     let opened = cx.open_window(options, |window, cx| {
@@ -49,6 +52,9 @@ pub fn solve(cx: &mut App, host: Arc<Host>, url: String, user_agent: String) -> 
                 .with_bounds(rect(viewport))
                 .build_as_child(window)
                 .expect("system webview unavailable");
+            // Invisible but still drawn, so Cloudflare's script runs at full speed.
+            crate::webviews::native::keep_running_hidden(&webview);
+            crate::webviews::native::hide_window(&webview);
 
             cx.spawn_in(window, async move |this, cx| {
                 // A stale clearance would look like an instant solve, so clear it and reload.
@@ -57,8 +63,17 @@ pub fn solve(cx: &mut App, host: Arc<Host>, url: String, user_agent: String) -> 
                 // Two passing checks in a row count as solved.
                 let passed = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let mut clear_ticks = 0;
+                let mut shown = false;
                 loop {
                     cx.background_executor().timer(Duration::from_secs(1)).await;
+                    if !shown && started.elapsed() > SHOW_AFTER {
+                        shown = true;
+                        let _ = this.update_in(cx, |this: &mut Challenge, window, cx| {
+                            crate::webviews::native::show_window(&this.webview);
+                            window.activate_window();
+                            cx.activate(true);
+                        });
+                    }
                     // Give up eventually, or every queued page waits behind it.
                     if started.elapsed() > TIMEOUT {
                         let _ = this.update_in(cx, |_, window, _| window.remove_window());
@@ -111,10 +126,7 @@ pub fn solve(cx: &mut App, host: Arc<Host>, url: String, user_agent: String) -> 
         })
     });
     // If the window never opened, `tx` was dropped, which reads as a cancel.
-    if let Ok(handle) = opened {
-        cx.activate(true);
-        let _ = handle.update(cx, |_, window, _| window.activate_window());
-    }
+    let _ = opened;
     rx
 }
 

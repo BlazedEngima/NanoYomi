@@ -362,7 +362,7 @@ impl WebViewHost {
 
 /// WebKit calls wry doesn't wrap. Windows and Linux get stand-ins for now, so pages that need them don't work there yet.
 #[cfg(target_os = "macos")]
-mod native {
+pub(crate) mod native {
     use objc2::MainThreadOnly;
     use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
     use objc2_foundation::{NSPoint, NSString, NSURL};
@@ -465,7 +465,7 @@ mod native {
 }
 
 #[cfg(not(target_os = "macos"))]
-mod native {
+pub(crate) mod native {
     use wry::WebView;
 
     // wry can't change the user agent after creation. Windows and Linux need per-platform calls.

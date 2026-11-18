@@ -139,7 +139,7 @@ struct Data {
     #[serde(default)]
     zoom: Option<f32>,
     #[serde(default)]
-    byparr_autostart: bool,
+    solver_url: String,
     #[serde(default)]
     page_cache_mb: Option<u32>,
     /// Unset means sized for this machine.
@@ -284,14 +284,16 @@ impl Store {
         self.save_soon(cx);
     }
 
-    pub fn byparr_autostart(&self) -> bool {
-        self.data.byparr_autostart
+    pub fn solver_url(&self) -> &str {
+        &self.data.solver_url
     }
 
-    pub fn set_byparr_autostart(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.data.byparr_autostart = on;
-        self.save_soon(cx);
-        cx.notify();
+    pub fn set_solver_url(&mut self, url: &str, cx: &mut Context<Self>) {
+        if self.data.solver_url != url {
+            self.data.solver_url = url.to_string();
+            crate::solver::set_url(url);
+            self.save_soon(cx);
+        }
     }
 
     pub fn vertical_reader(&self) -> bool {

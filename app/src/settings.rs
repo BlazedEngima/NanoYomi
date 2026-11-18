@@ -1,8 +1,7 @@
-use crate::byparr::{Service, Status};
 use crate::catalog::small_button;
 use crate::input::{InputEvent, TextInput};
 use crate::store::{Store, SyncStatus};
-use crate::{FAINT, LINE, MONO, MUTED, RULE, SURFACE, TEXT, ACCENT, ACCENT_TEXT, BG, heading, u};
+use crate::{FAINT, MONO, MUTED, RULE, ACCENT_TEXT, heading, u};
 use gpui::{
     AppContext, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
     StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, rgb,
@@ -12,33 +11,43 @@ const PAD: f32 = 40.;
 
 pub struct Settings {
     store: Entity<Store>,
-    byparr: Entity<Service>,
     /// Shows "Cleared" on the button until the next visit.
     covers_cleared: bool,
     pages_cleared: bool,
     sync_host: Entity<TextInput>,
     sync_key: Entity<TextInput>,
+    solver: Entity<TextInput>,
 }
 
 impl Settings {
-    pub fn new(store: Entity<Store>, byparr: Entity<Service>, cx: &mut Context<Self>) -> Self {
+    pub fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
-        cx.observe(&byparr, |_, _, cx| cx.notify()).detach();
-        let field = |placeholder: &str, text: &str, cx: &mut Context<Self>| {
+        let plain = |placeholder: &str, text: &str, cx: &mut Context<Self>| {
             let (placeholder, text) = (placeholder.to_string(), text.to_string());
-            let input = cx.new(|cx| {
+            cx.new(|cx| {
                 let mut t = TextInput::new(placeholder, cx);
                 t.text = text;
                 t.icon = false;
                 t
-            });
+            })
+        };
+        let field = |placeholder: &str, text: &str, cx: &mut Context<Self>| {
+            let input = plain(placeholder, text, cx);
             cx.subscribe(&input, |this, _, _: &InputEvent, cx| this.sync_now(cx)).detach();
             input
         };
         let cfg = store.read(cx).sync_config().clone();
         let sync_host = field("Server, e.g. http://192.168.0.3:8282", &cfg.host, cx);
         let sync_key = field("API key", &cfg.key, cx);
-        Settings { store, byparr, covers_cleared: false, pages_cleared: false, sync_host, sync_key }
+        let url = store.read(cx).solver_url().to_string();
+        let solver = plain("Optional, e.g. http://192.168.0.5:8191", &url, cx);
+        // The field has no change event, so save it whenever it redraws.
+        cx.observe(&solver, |this, input, cx| {
+            let url = input.read(cx).text.clone();
+            this.store.update(cx, |s, cx| s.set_solver_url(&url, cx));
+        })
+        .detach();
+        Settings { store, covers_cleared: false, pages_cleared: false, sync_host, sync_key, solver }
     }
 
     fn sync_now(&mut self, cx: &mut Context<Self>) {
@@ -46,40 +55,6 @@ impl Settings {
         self.store.update(cx, |s, cx| s.set_sync_account(&host, &key, cx));
         crate::sync::run(self.store.clone(), cx);
     }
-}
-
-struct Tip(&'static str);
-
-impl Render for Tip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px(u(10.))
-            .py(u(6.))
-            .rounded(u(6.))
-            .bg(rgb(SURFACE))
-            .border_1()
-            .border_color(rgb(LINE))
-            .text_size(u(12.))
-            .text_color(rgb(TEXT))
-            .child(self.0)
-    }
-}
-
-fn info(id: &'static str, tip: &'static str) -> impl IntoElement {
-    div()
-        .id(id)
-        .size(u(16.))
-        .rounded_full()
-        .border_1()
-        .border_color(rgb(LINE))
-        .flex()
-        .items_center()
-        .justify_center()
-        .font_family(MONO)
-        .text_size(u(10.))
-        .text_color(rgb(FAINT))
-        .child("i")
-        .tooltip(move |_, cx| cx.new(|_| Tip(tip)).into())
 }
 
 impl Render for Settings {
@@ -207,46 +182,6 @@ impl Render for Settings {
                     .when(restart, |d| d.child(div().text_size(u(13.)).text_color(rgb(ACCENT_TEXT)).child("Restart Nano to apply"))),
             )
             .child(div().flex_none().flex().gap(u(6.)).children(heap_chips));
-        let status = self.byparr.read(cx).status.clone();
-        let auto = self.store.read(cx).byparr_autostart();
-        let (label, busy) = match &status {
-            Status::Checking => ("Checking…".to_string(), true),
-            Status::NoDocker => ("Needs Docker Desktop".into(), false),
-            Status::Missing => ("Not downloaded".into(), false),
-            Status::Downloading => ("Downloading… (about 1 GB)".into(), true),
-            Status::Stopped => ("Stopped".into(), false),
-            Status::Starting => ("Working…".into(), true),
-            Status::Running => ("Running".into(), false),
-            Status::Failed(e) => (e.clone(), false),
-        };
-        let byparr = self.byparr.clone();
-        let action = match &status {
-            Status::Missing => Some(small_button("byparr-dl", "Download", true).on_click(move |_, _, cx| byparr.update(cx, |b, cx| b.download(cx)))),
-            Status::Stopped | Status::Failed(_) => Some(small_button("byparr-run", "Run", true).on_click(move |_, _, cx| byparr.update(cx, |b, cx| b.run(cx)))),
-            Status::Running => Some(small_button("byparr-stop", "Stop", false).on_click(move |_, _, cx| byparr.update(cx, |b, cx| b.stop(cx)))),
-            _ => None,
-        };
-        let store = self.store.clone();
-        let checkbox = div()
-            .id("byparr-auto")
-            .flex()
-            .items_center()
-            .gap(u(8.))
-            .cursor_pointer()
-            .child(
-                div()
-                    .size(u(16.))
-                    .rounded(u(4.))
-                    .border_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(u(11.))
-                    .when(auto, |d| d.bg(rgb(ACCENT)).border_color(rgb(ACCENT)).text_color(rgb(BG)).child("✓"))
-                    .when(!auto, |d| d.border_color(rgb(LINE))),
-            )
-            .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child("Always run on startup"))
-            .on_click(move |_, _, cx| store.update(cx, |s, cx| s.set_byparr_autostart(!auto, cx)));
 
         let (sync_label, sync_failed) = match &self.store.read(cx).sync_status {
             SyncStatus::Idle => (if self.store.read(cx).sync_config().key.is_empty() { "Not set up".to_string() } else { "Not synced yet".into() }, false),
@@ -315,7 +250,7 @@ impl Render for Settings {
             .child(reading)
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("SYNC"))
             .child(sync)
-            .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("UTILITIES"))
+            .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("CLOUDFLARE"))
             .child(
                 div()
                     .w_full()
@@ -324,7 +259,7 @@ impl Render for Settings {
                     .border_b_1()
                     .border_color(rgb(RULE))
                     .flex()
-                    .items_start()
+                    .items_center()
                     .gap_4()
                     .child(
                         div()
@@ -333,45 +268,12 @@ impl Render for Settings {
                             .flex()
                             .flex_col()
                             .gap(u(4.))
-                            .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child("Byparr"))
-                            .child(
-                                div()
-                                    .text_size(u(13.))
-                                    .text_color(rgb(MUTED))
-                                    .child("Solves Cloudflare's \u{201c}Just a moment\u{2026}\u{201d} checks without a window. Runs in Docker."),
-                            )
-                            .child(
-                                div()
-                                    .pt(u(6.))
-                                    .flex()
-                                    .items_center()
-                                    .gap(u(6.))
-                                    .child(checkbox)
-                                    .child(info("byparr-auto-info", "Starts with Nano, not with your computer")),
-                            ),
+                            .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child("Solver"))
+                            .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(
+                                "Nano passes Cloudflare checks on its own and only asks you to click when a site insists. If you run FlareSolverr or Byparr somewhere, add its address and Nano will try it first.",
+                            )),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(u(12.))
-                            .child(
-                                div()
-                                    .max_w(u(320.))
-                                    .truncate()
-                                    .font_family(MONO)
-                                    .text_size(u(12.))
-                                    .text_color(rgb(match &status {
-                                        Status::Running => ACCENT_TEXT,
-                                        Status::Failed(_) => ACCENT_TEXT,
-                                        _ => FAINT,
-                                    }))
-                                    .when(busy, |d| d.opacity(0.8))
-                                    .child(label),
-                            )
-                            .children(action),
-                    ),
+                    .child(div().flex_none().w(u(340.)).child(self.solver.clone())),
             )
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("STORAGE"))
             .child(storage)
