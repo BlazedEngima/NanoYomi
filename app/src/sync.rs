@@ -433,13 +433,17 @@ fn status_error(e: ureq::Error) -> String {
 /// The full library, or None if unchanged since `cursor`. Much faster than a merge.
 fn snapshot(cfg: &Config, cursor: i64) -> Result<Option<Reply>, String> {
     let host = cfg.host.trim().trim_end_matches('/');
-    let mut res = ureq::get(format!("{host}/api/sync/v2/snapshot"))
+    let res = ureq::get(format!("{host}/api/sync/v2/snapshot"))
         .header("X-API-Token", cfg.key.trim())
         .header("X-Device-ID", &cfg.device_id)
         .header("X-Device-Name", "Nano")
         .header("X-Sync-Cursor", cursor.to_string())
-        .call()
-        .map_err(status_error)?;
+        .call();
+    // A fresh server 404s until the first upload. Treat that as an empty library.
+    let mut res = match res {
+        Err(ureq::Error::StatusCode(404)) => return Ok(Some(Reply { mangas: vec![], sources: HashMap::new(), cursor: 0, full_requested: false })),
+        r => r.map_err(status_error)?,
+    };
     if res.status() == 304 {
         return Ok(None);
     }
