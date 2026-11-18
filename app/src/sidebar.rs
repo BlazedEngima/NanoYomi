@@ -50,15 +50,6 @@ fn label(text: &'static str) -> impl IntoElement {
     div().flex_none().px(u(10.)).pb(u(6.)).font_family(MONO).text_size(u(10.5)).text_color(rgb(FAINT)).child(text)
 }
 
-fn ago(ms: i64) -> String {
-    let mins = (store::now_ms() - ms).max(0) / 60_000;
-    match mins {
-        0 => "Synced just now".into(),
-        1..=59 => format!("Synced {mins} min ago"),
-        _ => format!("Synced {} h ago", mins / 60),
-    }
-}
-
 impl Root {
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         let on = !self.store.read(cx).sidebar_collapsed();
@@ -112,7 +103,7 @@ impl Root {
         let sync = match &self.store.read(cx).sync_status {
             SyncStatus::Idle => None,
             SyncStatus::Syncing => Some((0xC9A24Bu32, "Syncing…".to_string())),
-            SyncStatus::Done(ms) => Some((0x6FBF73, ago(*ms))),
+            SyncStatus::Done(ms) => Some((0x6FBF73, format!("Synced {}", store::ago(*ms, store::now_ms())))),
             SyncStatus::Failed(_) => Some((ACCENT, "Sync failed".to_string())),
         };
 

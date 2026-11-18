@@ -266,7 +266,7 @@ impl Browse {
     }
 }
 
-fn segment(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, on: bool) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn segment(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, on: bool) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .h(u(32.))

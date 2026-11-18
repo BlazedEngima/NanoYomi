@@ -6,7 +6,8 @@ use crate::covers::{CARD_H, CARD_W, Covers, Fetch, cover, grid};
 use crate::images::ImageCache;
 use crate::registry::Registry;
 use crate::store::{Series, Store, ago, now_ms};
-use crate::{ACCENT, ACCENT_TEXT, DISPLAY, FAINT, LINE, MONO, MUTED, RULE, SURFACE, Source, TEXT, heading, pill};
+use crate::browse::segment;
+use crate::{ACCENT, ACCENT_TEXT, FAINT, LINE, MONO, MUTED, RULE, SURFACE, Source, TEXT, heading, pill};
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement, ListAlignment, ListState,
     ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div, list,
@@ -31,13 +32,48 @@ pub struct GoBrowse;
 
 #[derive(Clone, Copy)]
 enum Item {
-    Hero,
     Heading,
+    Shelf,
+    Controls,
     Empty,
+    NoMatch,
     Row(usize),
+    Line(usize),
     UpdatesHeading,
     UpdatesHeader,
     Update(usize),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Filter {
+    All,
+    New,
+    Done,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Sort {
+    LastRead,
+    MostNew,
+    Title,
+}
+
+impl Sort {
+    fn label(self) -> &'static str {
+        match self {
+            Sort::LastRead => "Last read",
+            Sort::MostNew => "Most new chapters",
+            Sort::Title => "Title",
+        }
+    }
+
+    fn next(self) -> Sort {
+        match self {
+            Sort::LastRead => Sort::MostNew,
+            Sort::MostNew => Sort::Title,
+            Sort::Title => Sort::LastRead,
+        }
+    }
 }
 
 pub struct Library {
@@ -51,6 +87,7 @@ pub struct Library {
     items: Vec<Item>,
     cols: usize,
     card_w: f32,
+    width: f32,
     /// This frame's library, plus the (series, chapter) pairs for Latest Updates.
     /// The library first, then the series being read if it isn't saved, for the hero.
     series: Vec<Series>,
@@ -58,6 +95,15 @@ pub struct Library {
     updates: Vec<(usize, usize)>,
     checking: Option<(usize, usize)>,
     checked: bool,
+    filter: Filter,
+    sort: Sort,
+    as_list: bool,
+    relayout: bool,
+    kept: usize,
+    /// Library indexes after the filter and sort.
+    shown: Vec<usize>,
+    /// Indexes into `series` for Continue reading.
+    shelf: Vec<usize>,
     _subs: Vec<Subscription>,
 }
 
@@ -87,11 +133,20 @@ impl Library {
             items: vec![],
             cols: 1,
             card_w: CARD_W,
+            width: 0.,
             series: vec![],
             library_len: 0,
             updates: vec![],
             checking: None,
             checked: false,
+            filter: Filter::All,
+            sort: Sort::LastRead,
+            // NANO_LIBRARY=list starts in the list view (for testing).
+            as_list: std::env::var("NANO_LIBRARY").as_deref() == Ok("list"),
+            relayout: false,
+            kept: 0,
+            shown: vec![],
+            shelf: vec![],
             _subs: subs,
         }
     }
@@ -161,23 +216,18 @@ impl Library {
 
     fn item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         match self.items.get(ix).copied() {
-            Some(Item::Hero) => self.hero(cx),
             Some(Item::Heading) => {
                 let unread: usize = self.series[..self.library_len].iter().map(Series::unread).sum();
                 let note = match self.checking {
                     Some((done, total)) => format!("{} SERIES · CHECKING {done}/{total}", self.library_len),
                     None => format!("{} SERIES · {unread} UNREAD", self.library_len),
                 };
-                div()
-                    .w_full()
-                    .px(u(PAD))
-                    .pt(u(8.))
-                    .flex()
-                    .items_end()
-                    .child(div().flex_1().child(heading("Library", note)))
-                    .child(div().pb(u(5.)).text_size(u(13.)).text_color(rgb(MUTED)).child("Sorted by last read"))
-                    .into_any_element()
+                div().px(u(PAD)).pt(u(32.)).child(heading("Library", note)).into_any_element()
             }
+            Some(Item::Shelf) => self.shelf(cx),
+            Some(Item::Controls) => self.controls(cx),
+            Some(Item::NoMatch) => div().mx(u(PAD)).mt(u(24.)).p(u(40.)).rounded(u(12.)).border_1().border_color(rgb(LINE)).flex().justify_center().text_color(rgb(MUTED)).child("Nothing here with this filter.").into_any_element(),
+            Some(Item::Line(row)) => self.line(row, cx),
             Some(Item::Empty) => div()
                 .px(u(PAD))
                 .pt(u(24.))
@@ -190,8 +240,8 @@ impl Library {
                 .into_any_element(),
             Some(Item::Row(row)) => {
                 let start = row * self.cols;
-                let end = (start + self.cols).min(self.library_len);
-                let cards: Vec<AnyElement> = (start..end).map(|i| self.card(i, cx)).collect();
+                let end = (start + self.cols).min(self.shown.len());
+                let cards: Vec<AnyElement> = (start..end).map(|i| self.card(self.shown[i], cx)).collect();
                 div().flex().gap(u(GAP)).px(u(PAD)).pt(u(24.)).children(cards).into_any_element()
             }
             Some(Item::UpdatesHeading) => {
@@ -211,77 +261,159 @@ impl Library {
         }
     }
 
-    fn hero(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let history = self.store.read(cx).history().first().map(|s| (*s).clone());
-        let Some(s) = history else { return div().into_any_element() };
-        let p = s.progress.clone().unwrap_or_else(|| unreachable!());
-        let Some(ix) = self.series.iter().position(|x| x.source == s.source && x.url() == s.url()) else {
-            return div().into_any_element();
-        };
-        let image = self.cover_of(ix, cx);
-        let newer = s.unread();
-        let sub = match newer {
-            0 => format!("{} · up to date", s.source_name),
-            1 => format!("{} · 1 newer chapter", s.source_name),
-            n => format!("{} · {n} newer chapters", s.source_name),
-        };
+    fn section_title(text: &'static str) -> impl IntoElement {
+        div().font_family(MONO).text_size(u(13.)).font_weight(FontWeight::MEDIUM).text_color(rgb(MUTED)).child(text)
+    }
+
+    fn shelf(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let avail = self.width / crate::zoom() - 2. * PAD;
+        let n = ((avail + 14.) / 314.).floor().clamp(1., 3.) as usize;
+        let w = (avail - 14. * (n - 1) as f32) / n as f32;
+        let cards: Vec<AnyElement> = self.shelf.clone().into_iter().take(n).map(|ix| {
+            let image = self.cover_of(ix, cx);
+            let s = &self.series[ix];
+            let p = s.progress.clone().unwrap_or_else(|| unreachable!());
+            let page = if p.pages == 0 { 0. } else { ((p.page + 1) as f32 / p.pages as f32).min(1.) };
+            div()
+                .id(("shelf", ix))
+                .w(u(w))
+                .flex_none()
+                .flex()
+                .gap(u(14.))
+                .p(u(12.))
+                .rounded(u(12.))
+                .border_1()
+                .border_color(rgb(LINE))
+                .bg(rgb(SURFACE))
+                .cursor_pointer()
+                .hover(|d| d.bg(rgb(crate::HOVER)))
+                .child(div().flex_none().child(cover(image, s.title(), 74., 106., 0)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(u(5.))
+                        .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).truncate().child(s.title().to_string()))
+                        .child(div().text_size(u(13.)).text_color(rgb(MUTED)).truncate().child(format!("{} · page {} of {}", p.chapter_name, p.page + 1, p.pages)))
+                        .child(div().flex_1())
+                        .child(div().h(u(3.)).rounded(u(2.)).bg(rgb(LINE)).child(div().h_full().rounded(u(2.)).w(relative(page)).bg(rgb(ACCENT))))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .gap_2()
+                                .font_family(MONO)
+                                .text_size(u(11.))
+                                .text_color(rgb(FAINT))
+                                .child(div().truncate().child(s.source_name.clone()))
+                                .child(div().flex_none().child(ago(p.at, now_ms()))),
+                        ),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.resume(ix, None, cx)))
+                .into_any_element()
+        }).collect();
+        div()
+            .px(u(PAD))
+            .pt(u(30.))
+            .flex()
+            .flex_col()
+            .gap(u(14.))
+            .child(Self::section_title("CONTINUE READING"))
+            .child(div().flex().gap(u(14.)).children(cards))
+            .into_any_element()
+    }
+
+    fn controls(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let group = || div().flex().gap_1().p_1().rounded(u(20.)).border_1().border_color(rgb(LINE));
+        let filter = self.filter;
+        let filters = [(Filter::All, "All"), (Filter::New, "New chapters"), (Filter::Done, "Caught up")].map(|(f, label)| {
+            segment(label, label, filter == f).on_click(cx.listener(move |this, _, _, cx| {
+                this.filter = f;
+                this.relayout = true;
+                cx.notify();
+            }))
+        });
+        let as_list = self.as_list;
+        let layouts = [(false, "Grid"), (true, "List")].map(|(l, label)| {
+            segment(label, label, as_list == l).on_click(cx.listener(move |this, _, _, cx| {
+                this.as_list = l;
+                this.relayout = true;
+                cx.notify();
+            }))
+        });
         div()
             .w_full()
-            .flex()
-            .gap(u(48.))
-            .items_center()
             .px(u(PAD))
-            .pt(u(44.))
-            .pb(u(40.))
-            .child(div().flex_none().shadow_lg().child(cover(image, s.title(), 200., 300., 0)))
+            .pt(u(36.))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(u(10.))
+            .child(Self::section_title("EVERYTHING"))
+            .child(div().ml_auto().flex().flex_wrap().gap(u(10.)).child(group().children(filters))
+            .child(group().child(segment("sort", format!("Sort · {}", self.sort.label()), false).on_click(cx.listener(|this, _, _, cx| {
+                this.sort = this.sort.next();
+                this.relayout = true;
+                cx.notify();
+            }))))
+            .child(group().children(layouts)))
+            .into_any_element()
+    }
+
+    fn line(&mut self, row: usize, cx: &mut Context<Self>) -> AnyElement {
+        let i = self.shown[row];
+        let image = self.cover_of(i, cx);
+        let s = &self.series[i];
+        let chapter = s.progress.as_ref().map_or_else(|| format!("{} chapters", s.chapters.len()), |p| p.chapter_name.clone());
+        let when = s.progress.as_ref().map_or(String::new(), |p| ago(p.at, now_ms()));
+        let unread = s.unread();
+        let row = div()
+            .id(("line", i))
+            .px(u(6.))
+            .py(u(8.))
+            .flex()
+            .items_center()
+            .gap(u(16.))
+            .border_b_1()
+            .border_color(rgb(RULE))
+            .cursor_pointer()
+            .hover(|d| d.bg(rgb(SURFACE)))
+            .child(div().flex_none().child(cover(image, "", 40., 56., 0)))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(u(14.))
-                    .child(
-                        div()
-                            .font_family(MONO)
-                            .text_size(u(12.))
-                            .text_color(rgb(ACCENT_TEXT))
-                            .truncate()
-                            .child(format!("NOW READING · {} · P.{} / {}", p.chapter_name.to_uppercase(), p.page + 1, p.pages)),
-                    )
-                    .child(
-                        div()
-                            .font_family(DISPLAY)
-                            .font_weight(FontWeight::BLACK)
-                            .text_size(u(72.))
-                            .line_height(relative(0.88))
-                            .max_w(u(900.))
-                            .line_clamp(2)
-                            .text_ellipsis()
-                            .child(s.title().to_uppercase()),
-                    )
-                    .child(progress_bar(p.page + 1, p.pages))
-                    .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(sub))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(u(10.))
-                            .mt_2()
-                            .child(
-                                pill("resume", "Resume", true)
-                                    .child(div().font_family(MONO).text_size(u(12.)).opacity(0.6).child("⏎"))
-                                    .on_click(cx.listener(move |this, _, _, cx| this.resume(ix, None, cx))),
-                            )
-                            .child(pill("all-chapters", "All chapters", false).on_click(cx.listener(move |this, _, _, cx| this.open(ix, cx)))),
-                    ),
+                    .child(div().font_weight(FontWeight::MEDIUM).truncate().child(s.title().to_string()))
+                    .child(div().text_size(u(13.)).text_color(rgb(MUTED)).truncate().child(chapter)),
             )
-            .into_any_element()
+            .child(div().w(u(160.)).flex_none().truncate().text_size(u(13.)).text_color(rgb(MUTED)).child(s.source_name.clone()))
+            .child(div().w(u(110.)).flex_none().text_size(u(13.)).text_color(rgb(MUTED)).child(when))
+            .child(
+                div()
+                    .w(u(70.))
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .font_family(MONO)
+                    .text_size(u(12.))
+                    .text_color(rgb(ACCENT_TEXT))
+                    .child(if unread > 0 { format!("{unread} new") } else { "✓".into() }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.open(i, cx)));
+        div().w_full().px(u(PAD)).child(row).into_any_element()
     }
 
     fn card(&mut self, i: usize, cx: &mut Context<Self>) -> AnyElement {
         let image = self.cover_of(i, cx);
         let s = &self.series[i];
         let title = s.title().to_string();
+        let sub = match s.unread() {
+            _ if s.caught_up() => format!("Caught up · {}", s.source_name),
+            0 => s.source_name.clone(),
+            n => format!("{n} new · {}", s.source_name),
+        };
         div()
             .id(("lib", i))
             .w(u(self.card_w))
@@ -291,6 +423,7 @@ impl Library {
             .cursor_pointer()
             .child(card_cover(cover(image, &title, self.card_w, self.card_w * CARD_H / CARD_W, s.unread()), s.read_fraction(), s.caught_up()))
             .child(div().text_size(u(13.5)).font_weight(FontWeight::MEDIUM).truncate().child(title))
+            .child(div().mt(u(-5.)).text_size(u(12.)).text_color(rgb(FAINT)).truncate().child(sub))
             .on_click(cx.listener(move |this, _, _, cx| this.open(i, cx)))
             .into_any_element()
     }
@@ -384,14 +517,6 @@ fn card_cover(cover: AnyElement, read: Option<f32>, caught_up: bool) -> impl Int
     })
 }
 
-fn progress_bar(read: usize, total: usize) -> impl IntoElement {
-    let ticks = total.clamp(1, 48);
-    div().flex().gap(u(2.)).h(u(18.)).max_w(u(520.)).children((0..ticks).map(move |i| {
-        let done = (i + 1) * total.max(1) <= read * ticks;
-        div().flex_1().h_full().bg(rgb(if done { ACCENT } else { 0x3A352F }))
-    }))
-}
-
 impl Render for Library {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.zoom_seen != crate::zoom() {
@@ -399,6 +524,7 @@ impl Render for Library {
             self.list.remeasure();
         }
         let width = crate::content_width(window);
+        self.width = width;
         (self.cols, self.card_w) = grid(width, PAD, GAP, CARD_W);
         let store = self.store.read(cx);
         self.series = store.library().into_iter().cloned().map(|mut s| {
@@ -408,12 +534,25 @@ impl Render for Library {
             s
         }).collect();
         self.library_len = self.series.len();
-        let reading = store.history().into_iter().take(1).into_iter().cloned().map(|mut s| {
+        let reading: Vec<Series> = store.history().into_iter().take(3).cloned().map(|mut s| {
             s.chapters = s.visible();
             s.hidden_scanlators.clear();
             s
-        }).next();
-        let has_hero = reading.is_some();
+        }).collect();
+
+        let mut shown: Vec<usize> = (0..self.library_len)
+            .filter(|&i| match self.filter {
+                Filter::All => true,
+                Filter::New => self.series[i].unread() > 0,
+                Filter::Done => self.series[i].caught_up(),
+            })
+            .collect();
+        match self.sort {
+            Sort::LastRead => {}
+            Sort::MostNew => shown.sort_by_key(|&i| std::cmp::Reverse(self.series[i].unread())),
+            Sort::Title => shown.sort_by_cached_key(|&i| self.series[i].title().to_lowercase()),
+        }
+        self.shown = shown;
 
         let mut updates: Vec<(usize, usize, i64)> = self
             .series
@@ -425,28 +564,49 @@ impl Render for Library {
             .collect();
         updates.sort_by_key(|u| -u.2);
         self.updates = updates.into_iter().take(UPDATES).map(|(s, c, _)| (s, c)).collect();
-        // Read from Browse without saving. It's still the hero, so keep it.
-        if let Some(r) = reading
-            && !self.series.iter().any(|x| x.source == r.source && x.url() == r.url())
-        {
-            self.series.push(r);
-        }
+        // Something read from Browse without saving still belongs on the shelf.
+        self.shelf = reading
+            .into_iter()
+            .map(|r| match self.series.iter().position(|x| x.source == r.source && x.url() == r.url()) {
+                Some(i) => i,
+                None => {
+                    self.series.push(r);
+                    self.series.len() - 1
+                }
+            })
+            .collect();
 
-        let mut items = vec![];
-        if has_hero {
-            items.push(Item::Hero);
+        let mut items = vec![Item::Heading];
+        if !self.shelf.is_empty() {
+            items.push(Item::Shelf);
         }
-        items.push(Item::Heading);
         if self.library_len == 0 {
             items.push(Item::Empty);
+        } else {
+            items.push(Item::Controls);
+            if self.shown.is_empty() {
+                items.push(Item::NoMatch);
+            } else if self.as_list {
+                items.extend((0..self.shown.len()).map(Item::Line));
+            } else {
+                items.extend((0..self.shown.len().div_ceil(self.cols)).map(Item::Row));
+            }
         }
-        items.extend((0..self.library_len.div_ceil(self.cols)).map(Item::Row));
         if !self.updates.is_empty() {
             items.extend([Item::UpdatesHeading, Item::UpdatesHeader]);
             items.extend((0..self.updates.len()).map(Item::Update));
         }
-        if items.len() != self.list.item_count() {
-            self.list.reset(items.len());
+        // Swap only what follows the controls, so changing them keeps your scroll position.
+        let old = self.list.item_count();
+        if self.relayout || items.len() != old {
+            self.relayout = false;
+            let keep = items.iter().position(|i| matches!(i, Item::Controls)).map_or(0, |c| c + 1);
+            if keep == self.kept && keep <= old {
+                self.list.splice(keep..old, items.len() - keep);
+            } else {
+                self.list.reset(items.len());
+            }
+            self.kept = keep;
         }
         self.items = items;
 
