@@ -18,7 +18,8 @@ use std::sync::Arc;
 
 const PAD: f32 = 40.;
 const GAP: f32 = 20.;
-const UPDATES: usize = 10;
+/// How many recent chapters the Updates page lists.
+const UPDATES: usize = 100;
 
 pub struct Resume {
     pub source: Source,
@@ -39,7 +40,6 @@ enum Item {
     NoMatch,
     Row(usize),
     Line(usize),
-    UpdatesHeading,
     UpdatesHeader,
     Update(usize),
 }
@@ -71,6 +71,9 @@ impl Sort {
 }
 
 pub struct Library {
+    /// The same data drives the Updates page, so new chapters are only checked once.
+    pub updates_page: bool,
+    page_seen: bool,
     store: Entity<Store>,
     registry: Entity<Registry>,
     cache: Entity<ImageCache>,
@@ -120,6 +123,8 @@ impl Library {
             }),
         ];
         Library {
+            updates_page: false,
+            page_seen: false,
             store,
             registry,
             cache,
@@ -220,11 +225,22 @@ impl Library {
                     Some((done, total)) => format!("{} SERIES · CHECKING {done}/{total}", self.library_len),
                     None => format!("{} SERIES · {unread} UNREAD", self.library_len),
                 };
+                if self.updates_page {
+                    let fresh = self.updates.iter().filter(|(si, ci)| !self.series[*si].reading_index().is_some_and(|r| *ci >= r)).count();
+                    let note = match self.checking {
+                        Some((done, total)) => format!("CHECKING {done}/{total}"),
+                        None => format!("{fresh} NEW IN YOUR LIBRARY"),
+                    };
+                    return div().px(u(PAD)).pt(u(32.)).child(heading("Updates", note)).into_any_element();
+                }
                 div().px(u(PAD)).pt(u(32.)).child(heading("Library", note)).into_any_element()
             }
             Some(Item::Shelf) => self.shelf(cx),
             Some(Item::Controls) => self.controls(cx),
-            Some(Item::NoMatch) => div().mx(u(PAD)).mt(u(24.)).p(u(40.)).rounded(u(12.)).border_1().border_color(rgb(LINE)).flex().justify_center().text_color(rgb(MUTED)).child("Nothing here with this filter.").into_any_element(),
+            Some(Item::NoMatch) => {
+                let text = if self.updates_page { "No new chapters yet. Series you add to your library show up here when they update." } else { "Nothing here with this filter." };
+                div().mx(u(PAD)).mt(u(24.)).p(u(40.)).rounded(u(12.)).border_1().border_color(rgb(LINE)).flex().justify_center().text_color(rgb(MUTED)).child(text).into_any_element()
+            }
             Some(Item::Line(row)) => self.line(row, cx),
             Some(Item::Empty) => div()
                 .px(u(PAD))
@@ -241,9 +257,6 @@ impl Library {
                 let end = (start + self.cols).min(self.shown.len());
                 let cards: Vec<AnyElement> = (start..end).map(|i| self.card(self.shown[i], cx)).collect();
                 div().flex().gap(u(GAP)).px(u(PAD)).pt(u(24.)).children(cards).into_any_element()
-            }
-            Some(Item::UpdatesHeading) => {
-                div().px(u(PAD)).pt(u(48.)).child(heading("Latest Updates", "")).into_any_element()
             }
             Some(Item::UpdatesHeader) => div()
                 .pt(u(14.))
@@ -523,13 +536,13 @@ impl Library {
             div().font_family(MONO).text_size(u(12.)).text_color(rgb(color)).child(status),
         ]
         .map(IntoElement::into_any_element);
-        div()
+        let row = div()
             .id(("update", row))
             .cursor_pointer()
             .hover(|d| d.bg(rgb(SURFACE)))
-            .child(mono_row(cells, TEXT, 14., RULE).py(u(10.)))
-            .on_click(cx.listener(move |this, _, _, cx| this.resume(si, Some(ci), cx)))
-            .into_any_element()
+            .child(mono_row(cells, TEXT, 14., RULE).mx_0().py(u(10.)))
+            .on_click(cx.listener(move |this, _, _, cx| this.resume(si, Some(ci), cx)));
+        div().w_full().px(u(PAD)).child(row).into_any_element()
     }
 }
 
@@ -648,24 +661,33 @@ impl Render for Library {
             .collect();
 
         let mut items = vec![Item::Heading];
-        if !self.shelf.is_empty() {
-            items.push(Item::Shelf);
-        }
-        if self.library_len == 0 {
-            items.push(Item::Empty);
-        } else {
-            items.push(Item::Controls);
-            if self.shown.is_empty() {
+        if self.updates_page {
+            if self.updates.is_empty() {
                 items.push(Item::NoMatch);
-            } else if self.as_list {
-                items.extend((0..self.shown.len()).map(Item::Line));
             } else {
-                items.extend((0..self.shown.len().div_ceil(self.cols)).map(Item::Row));
+                items.push(Item::UpdatesHeader);
+                items.extend((0..self.updates.len()).map(Item::Update));
+            }
+        } else {
+            if !self.shelf.is_empty() {
+                items.push(Item::Shelf);
+            }
+            if self.library_len == 0 {
+                items.push(Item::Empty);
+            } else {
+                items.push(Item::Controls);
+                if self.shown.is_empty() {
+                    items.push(Item::NoMatch);
+                } else if self.as_list {
+                    items.extend((0..self.shown.len()).map(Item::Line));
+                } else {
+                    items.extend((0..self.shown.len().div_ceil(self.cols)).map(Item::Row));
+                }
             }
         }
-        if !self.updates.is_empty() {
-            items.extend([Item::UpdatesHeading, Item::UpdatesHeader]);
-            items.extend((0..self.updates.len()).map(Item::Update));
+        if self.page_seen != self.updates_page {
+            self.page_seen = self.updates_page;
+            self.list.reset(items.len());
         }
         // Swap only what follows the controls, so changing them keeps your scroll position.
         let old = self.list.item_count();

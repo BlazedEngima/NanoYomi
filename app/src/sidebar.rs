@@ -185,6 +185,7 @@ impl Root {
                     .gap(u(2.))
                     .when(!narrow, |d| d.child(label("READING")))
                     .child(nav(Tab::Library, "書庫", "Library", cx))
+                    .child(nav(Tab::Updates, "新着", "Updates", cx))
                     .child(nav(Tab::History, "履歴", "History", cx)),
             )
             .when(source_rows.is_empty(), |d| d.child(div().flex_1()))

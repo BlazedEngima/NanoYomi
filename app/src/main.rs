@@ -278,6 +278,7 @@ gpui::actions!(yomi, [Quit, ShowLibrary, ShowBrowse, ShowExtensions, ShowHistory
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Library,
+    Updates,
     Browse,
     Extensions,
     History,
@@ -341,6 +342,10 @@ impl Root {
 
     fn show(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = tab;
+        self.library.update(cx, |l, cx| {
+            l.updates_page = tab == Tab::Updates;
+            cx.notify();
+        });
         self.manga = None;
         self.migrate = None;
         match tab {
@@ -440,7 +445,7 @@ impl Render for Root {
         }
         let screen: AnyElement = match self.tab {
             _ if self.migrate.is_some() => self.migrate.as_ref().unwrap().0.clone().into_any_element(),
-            Tab::Library => self.library.clone().into_any_element(),
+            Tab::Library | Tab::Updates => self.library.clone().into_any_element(),
             Tab::Browse => self.browse.clone().into_any_element(),
             Tab::Extensions => self.catalog.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
             Tab::History => self.history.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
