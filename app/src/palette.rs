@@ -10,6 +10,7 @@ enum Go {
     Source(String),
     Tab(Tab),
     Search(String),
+    SearchAll(String),
     Sync,
 }
 
@@ -74,6 +75,7 @@ impl Root {
         let pages = [
             ("Library", Go::Tab(Tab::Library), ""),
             ("Updates", Go::Tab(Tab::Updates), ""),
+            ("Search every source", Go::Tab(Tab::Search), ""),
             ("History", Go::Tab(Tab::History), ""),
             ("Downloads", Go::Tab(Tab::Downloads), ""),
             ("Extensions", Go::Tab(Tab::Extensions), ""),
@@ -83,8 +85,9 @@ impl Root {
         out.extend(pages.into_iter().filter(|(l, _, _)| hit(l)).map(|(l, go, hint)| Entry { group: "GO TO", label: l.into(), hint: hint.into(), go }));
         if !query.is_empty() {
             let name = self.browse.read(cx).source_id().and_then(|id| self.registry.read(cx).source(id)).map(|s| s.name);
+            out.push(Entry { group: "SEARCH", label: format!("Search every source for “{query}”"), hint: "⏎".into(), go: Go::SearchAll(query.clone()) });
             if let Some(name) = name {
-                out.push(Entry { group: "SEARCH", label: format!("Search {name} for “{query}”"), hint: "⏎".into(), go: Go::Search(query) });
+                out.push(Entry { group: "SEARCH", label: format!("Search {name} for “{query}”"), hint: String::new(), go: Go::Search(query) });
             }
         }
         out
@@ -108,6 +111,10 @@ impl Root {
             }
             Go::Tab(tab) => self.show(tab, window, cx),
             Go::Sync => sync::run(self.store.clone(), cx),
+            Go::SearchAll(query) => {
+                self.show(Tab::Search, window, cx);
+                self.global.update(cx, |g, cx| g.search(query, cx));
+            }
             Go::Search(query) => {
                 self.show(Tab::Browse, window, cx);
                 let search = self.browse.read(cx).search.clone();

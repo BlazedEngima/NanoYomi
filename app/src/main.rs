@@ -6,6 +6,7 @@ mod downloads;
 mod ext_settings;
 mod extensions;
 mod filters;
+mod global;
 mod history;
 mod host;
 mod images;
@@ -290,6 +291,7 @@ gpui::actions!(yomi, [Quit, ShowLibrary, ShowBrowse, ShowExtensions, ShowHistory
 enum Tab {
     Library,
     Updates,
+    Search,
     Downloads,
     Browse,
     Extensions,
@@ -304,6 +306,7 @@ struct Root {
     tab: Tab,
     library: Entity<Library>,
     browse: Entity<Browse>,
+    global: Entity<global::GlobalSearch>,
     catalog: Option<Entity<Catalog>>,
     history: Option<Entity<History>>,
     settings: Option<Entity<settings::Settings>>,
@@ -332,22 +335,24 @@ impl Root {
         let registry = cx.new(|cx| Registry::new(host, data_dir.clone(), cx));
         let library = cx.new(|cx| Library::new(store.clone(), registry.clone(), cache.clone(), cx));
         let browse = cx.new(|cx| Browse::new(registry.clone(), store.clone(), cache.clone(), cx));
+        let global = cx.new(|cx| global::GlobalSearch::new(registry.clone(), store.clone(), cache.clone(), cx));
         let subs = vec![
             cx.subscribe_in(&browse, window, |this, _, ev: &OpenManga, window, cx| this.open_manga(ev, window, cx)),
+            cx.subscribe_in(&global, window, |this, _, ev: &OpenManga, window, cx| this.open_manga(ev, window, cx)),
             cx.subscribe_in(&library, window, |this, _, ev: &OpenManga, window, cx| this.open_manga(ev, window, cx)),
             cx.subscribe_in(&library, window, |this, _, ev: &Resume, window, cx| this.resume(ev, window, cx)),
             cx.subscribe_in(&library, window, |this, _, _: &GoBrowse, window, cx| this.show(Tab::Browse, window, cx)),
         ];
         let tab = if demo().is_some() { Tab::Browse } else { Tab::Library };
         // NANO_TAB=settings|browse starts on that tab (for testing).
-        let tab = match std::env::var("NANO_TAB").as_deref() { Ok("settings") => Tab::Settings, Ok("browse") => Tab::Browse, _ => tab };
+        let tab = match std::env::var("NANO_TAB").as_deref() { Ok("settings") => Tab::Settings, Ok("browse") => Tab::Browse, Ok("search") => Tab::Search, _ => tab };
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let settings = (tab == Tab::Settings).then(|| {
             let store = store.clone();
             cx.new(|cx| settings::Settings::new(store, cx))
         });
-        Root { cache, store, registry, tab, library, browse, catalog: None, history: None, settings, manga: None, migrate: None, reader: None, palette: None, closing: None, panel_moves: 0, sidebar_moves: 0, focus, _subs: subs }
+        Root { cache, store, registry, tab, library, browse, global, catalog: None, history: None, settings, manga: None, migrate: None, reader: None, palette: None, closing: None, panel_moves: 0, sidebar_moves: 0, focus, _subs: subs }
     }
 
     fn zoom_by(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -483,6 +488,7 @@ impl Render for Root {
             _ if self.migrate.is_some() => self.migrate.as_ref().unwrap().0.clone().into_any_element(),
             Tab::Library | Tab::Updates => self.library.clone().into_any_element(),
             Tab::Browse => self.browse.clone().into_any_element(),
+            Tab::Search => self.global.clone().into_any_element(),
             Tab::Downloads => downloads::get(cx).into_any_element(),
             Tab::Extensions => self.catalog.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
             Tab::History => self.history.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
