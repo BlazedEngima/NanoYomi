@@ -196,11 +196,26 @@ impl Library {
                 let Ok(v) = result else { continue };
                 let chapters = v["chapters"].as_array().cloned().unwrap_or_default();
                 let _ = this.update(cx, |this, cx| {
-                    this.store.update(cx, |store, cx| {
-                        if store.get(&source.id, manga["url"].as_str().unwrap_or_default()).is_some() {
-                            store.update(&source.id, &source.name, &manga, cx, |s| s.chapters = chapters);
+                    let new = this.store.update(cx, |store, cx| {
+                        if store.get(&source.id, manga["url"].as_str().unwrap_or_default()).is_none() {
+                            return vec![];
                         }
+                        let auto = store.auto_download();
+                        store.update(&source.id, &source.name, &manga, cx, |s| {
+                            let known: std::collections::HashSet<String> = s.chapters.iter().filter_map(|c| c["url"].as_str().map(str::to_string)).collect();
+                            // Only when the list was known before, or a first check would download everything.
+                            let fresh = if auto && s.in_library && !known.is_empty() { chapters.iter().filter(|c| c["url"].as_str().is_some_and(|u| !known.contains(u))).cloned().collect() } else { vec![] };
+                            s.chapters = chapters;
+                            // Within the scanlator filter, oldest first.
+                            let visible = s.visible();
+                            fresh.into_iter().filter(|c: &Value| visible.iter().any(|v| v["url"] == c["url"])).rev().collect::<Vec<Value>>()
+                        })
                     });
+                    if !new.is_empty() {
+                        let title = manga["title"].as_str().unwrap_or_default().to_string();
+                        let jobs = new.into_iter().map(|chapter| crate::downloads::Job { source: source.clone(), title: title.clone(), chapter }).collect();
+                        crate::downloads::get(cx).update(cx, |d, cx| d.enqueue(jobs, cx));
+                    }
                 });
             }
             let _ = this.update(cx, |this, cx| {

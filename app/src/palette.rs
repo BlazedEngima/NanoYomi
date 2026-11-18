@@ -75,6 +75,7 @@ impl Root {
             ("Library", Go::Tab(Tab::Library), ""),
             ("Updates", Go::Tab(Tab::Updates), ""),
             ("History", Go::Tab(Tab::History), ""),
+            ("Downloads", Go::Tab(Tab::Downloads), ""),
             ("Extensions", Go::Tab(Tab::Extensions), ""),
             ("Settings", Go::Tab(Tab::Settings), if cfg!(target_os = "macos") { "⌘," } else { "" }),
             ("Sync now", Go::Sync, "SyncYomi"),

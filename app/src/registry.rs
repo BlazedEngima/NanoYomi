@@ -70,12 +70,12 @@ impl Registry {
     }
 
     pub fn source(&self, id: &str) -> Option<Source> {
-        self.sources.iter().find(|s| s.id == id).map(|s| Source { host: self.host.clone(), id: s.id.clone(), name: s.name.clone(), installed: true })
+        self.sources.iter().find(|s| s.id == id).map(|s| Source { host: self.host.clone(), id: s.id.clone(), name: s.name.clone(), lang: s.lang.clone(), installed: true })
     }
 
     /// Falls back to a stand-in that opens the series from what was saved.
     pub fn source_or_saved(&self, id: &str, name: &str) -> Source {
-        self.source(id).unwrap_or_else(|| Source { host: self.host.clone(), id: id.into(), name: name.into(), installed: false })
+        self.source(id).unwrap_or_else(|| Source { host: self.host.clone(), id: id.into(), name: name.into(), lang: String::new(), installed: false })
     }
 
     pub fn languages(&self, pkg: &str) -> Vec<String> {

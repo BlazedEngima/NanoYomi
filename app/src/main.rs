@@ -2,6 +2,7 @@ mod browse;
 mod catalog;
 mod challenge;
 mod covers;
+mod downloads;
 mod extensions;
 mod filters;
 mod history;
@@ -102,6 +103,7 @@ impl gpui::AssetSource for Assets {
             "icons/search.svg" => Some(include_bytes!("../assets/icons/search.svg").as_slice().into()),
             "icons/chevron.svg" => Some(include_bytes!("../assets/icons/chevron.svg").as_slice().into()),
             "icons/bookmark.svg" => Some(include_bytes!("../assets/icons/bookmark.svg").as_slice().into()),
+            "icons/downloaded.svg" => Some(include_bytes!("../assets/icons/downloaded.svg").as_slice().into()),
             "icons/check.svg" => Some(include_bytes!("../assets/icons/check.svg").as_slice().into()),
             "icons/sidebar.svg" => Some(include_bytes!("../assets/icons/sidebar.svg").as_slice().into()),
             _ => None,
@@ -175,6 +177,8 @@ pub struct Source {
     pub host: Arc<Host>,
     pub id: String,
     pub name: String,
+    /// Empty when the extension was removed.
+    pub lang: String,
     /// False for a saved series whose extension was removed.
     pub installed: bool,
 }
@@ -285,6 +289,7 @@ gpui::actions!(yomi, [Quit, ShowLibrary, ShowBrowse, ShowExtensions, ShowHistory
 enum Tab {
     Library,
     Updates,
+    Downloads,
     Browse,
     Extensions,
     History,
@@ -477,6 +482,7 @@ impl Render for Root {
             _ if self.migrate.is_some() => self.migrate.as_ref().unwrap().0.clone().into_any_element(),
             Tab::Library | Tab::Updates => self.library.clone().into_any_element(),
             Tab::Browse => self.browse.clone().into_any_element(),
+            Tab::Downloads => downloads::get(cx).into_any_element(),
             Tab::Extensions => self.catalog.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
             Tab::History => self.history.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
             Tab::Settings => self.settings.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
@@ -553,6 +559,7 @@ fn main() {
     std::fs::create_dir_all(&data_dir).expect("create data dir");
     covers::set_cache_dir(data_dir.join("covers"));
     page_cache::set_dir(data_dir.join("pages"));
+    downloads::set_dir(data_dir.join("downloads"));
     // Kagane serves JPEG XL, which `image` only decodes through this hook.
     jxl_oxide::integration::register_image_decoding_hook();
     let heap_mb = Store::load(data_dir.join("library.json")).host_heap_mb().unwrap_or_else(host::auto_heap_mb);
@@ -562,6 +569,7 @@ fn main() {
 
     gpui_platform::application().with_assets(Assets).run(move |cx: &mut App| {
         load_fonts(cx);
+        downloads::init(cx);
         webviews::start(cx, host.clone());
         cx.bind_keys([
             gpui::KeyBinding::new("cmd-1", ShowLibrary, None),

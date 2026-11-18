@@ -183,8 +183,14 @@ impl Reader {
         let generation = self.generation;
         let source = self.source.clone();
         let chapter = self.chapters[index].clone();
+        let title = self.manga["title"].as_str().unwrap_or_default().to_string();
         cx.spawn(async move |this, cx| {
-            let result = source.call(cx, "pages", json!({ "chapter": chapter })).await;
+            // A downloaded chapter reads from disk, with no network at all.
+            let local = { let (source, chapter) = (source.clone(), chapter.clone()); cx.background_executor().spawn(async move { crate::downloads::local_pages(&source, &title, &chapter) }).await };
+            let result = match local {
+                Some(files) => Ok(Value::Array(files.into_iter().map(|f| json!({ "local": f })).collect())),
+                None => source.call(cx, "pages", json!({ "chapter": chapter })).await,
+            };
             let _ = this.update(cx, |this, cx| {
                 if this.generation != generation {
                     return;
@@ -330,7 +336,12 @@ impl Reader {
             let result: Result<Picture, String> = async {
                 let cache_key = page.to_string();
                 let k = cache_key.clone();
-                let bytes = match cx.background_executor().spawn(async move { page_cache::get(&k) }).await {
+                let local = page["local"].as_str().map(PathBuf::from);
+                let cached = cx.background_executor().spawn(async move { match local {
+                    Some(file) => std::fs::read(file).ok(),
+                    None => page_cache::get(&k),
+                } }).await;
+                let bytes = match cached {
                     Some(bytes) => bytes,
                     None => {
                         let path = source.call(cx, "download", json!({ "page": page })).await?;

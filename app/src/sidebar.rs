@@ -209,6 +209,7 @@ impl Root {
                     .flex()
                     .flex_col()
                     .gap(u(2.))
+                    .child(nav(Tab::Downloads, "保存", "Downloads", cx))
                     .child(nav(Tab::Extensions, "拡張", "Extensions", cx))
                     .child(nav(Tab::Settings, "設定", "Settings", cx)),
             )

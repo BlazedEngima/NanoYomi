@@ -202,6 +202,8 @@ struct Data {
     sidebar_collapsed: bool,
     #[serde(default)]
     repos: Vec<crate::extensions::Repo>,
+    #[serde(default)]
+    auto_download: bool,
 }
 
 #[derive(Clone)]
@@ -350,6 +352,16 @@ impl Store {
     pub fn remove_repo(&mut self, url: &str, cx: &mut Context<Self>) {
         self.data.repos.retain(|r| r.url != url);
         self.save_soon(cx);
+    }
+
+    pub fn auto_download(&self) -> bool {
+        self.data.auto_download
+    }
+
+    pub fn set_auto_download(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.data.auto_download = on;
+        self.save_soon(cx);
+        cx.notify();
     }
 
     pub fn sidebar_collapsed(&self) -> bool {

@@ -8,7 +8,7 @@ use crate::input::{InputEvent, TextInput};
 use crate::store::{Store, default_hidden, now_ms, scanlator_counts, visible_chapters};
 use crate::{ACCENT_TEXT, BODY, DISPLAY, FAINT, LINE, MONO, MUTED, RULE, SURFACE, Source, TEXT, heading, pill};
 use gpui::{
-    AnyElement, AppContext, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement, ListAlignment,
+    AnyElement, App, AppContext, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement, ListAlignment,
     ListState, ObjectFit, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, StyledImage,
     Subscription, Window, div, img, list, prelude::FluentBuilder, relative, rgb,
 };
@@ -59,6 +59,8 @@ pub struct MangaView {
     /// Read state of each chapter in `visible`, and the bookmarked urls, from the saved record.
     read: Vec<bool>,
     bookmarks: std::collections::BTreeSet<String>,
+    /// Folder names of the chapters on disk.
+    downloaded: std::collections::HashSet<String>,
     /// The chapter whose actions menu is open, and where.
     row_menu: Option<(usize, gpui::Point<gpui::Pixels>)>,
     _subs: Vec<Subscription>,
@@ -71,7 +73,12 @@ impl MangaView {
         // Saved series show their stored chapters straight away until the update below lands.
         let saved = store.read(cx).get(&source.id, manga["url"].as_str().unwrap_or_default()).cloned();
         let search = cx.new(|cx| TextInput::new("Search chapters…", cx));
-        let subs = vec![cx.observe(&store, |_, _, cx| cx.notify()), cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify())];
+        let downloads = crate::downloads::get(cx);
+        let subs = vec![
+            cx.observe(&store, |_, _, cx| cx.notify()),
+            cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify()),
+            cx.observe(&downloads, |this, _, cx| this.refresh_downloaded(cx)),
+        ];
         let call_source = source.clone();
         let request = json!({ "manga": manga, "chapters": [] });
         let installed = source.installed;
@@ -108,6 +115,7 @@ impl MangaView {
         } else {
             "loading chapters…".into()
         };
+        let downloaded = crate::downloads::downloaded(&source, manga["title"].as_str().unwrap_or_default());
         MangaView {
             source,
             cache,
@@ -129,6 +137,7 @@ impl MangaView {
             read: vec![],
             bookmarks: Default::default(),
             row_menu: None,
+            downloaded,
             status: status.into(),
             _subs: subs,
         }
@@ -176,6 +185,30 @@ impl MangaView {
         cx.notify();
     }
 
+    fn title(&self) -> String {
+        self.manga["title"].as_str().unwrap_or_default().to_string()
+    }
+
+    fn refresh_downloaded(&mut self, cx: &mut Context<Self>) {
+        self.downloaded = crate::downloads::downloaded(&self.source, &self.title());
+        cx.notify();
+    }
+
+    fn job(&self, i: usize) -> crate::downloads::Job {
+        crate::downloads::Job { source: self.source.clone(), title: self.title(), chapter: self.visible[i].clone() }
+    }
+
+    fn is_downloaded(&self, i: usize) -> bool {
+        self.downloaded.contains(&crate::downloads::chapter_name(&self.visible[i]))
+    }
+
+    fn download(&mut self, rows: Vec<usize>, cx: &mut Context<Self>) {
+        let jobs = rows.into_iter().map(|i| self.job(i)).collect();
+        crate::downloads::get(cx).update(cx, |d, cx| d.enqueue(jobs, cx));
+        self.row_menu = None;
+        cx.notify();
+    }
+
     /// Changes the saved record, creating it if needed.
     fn edit(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut crate::store::Series)) {
         let (source, manga) = (self.source.clone(), self.manga.clone());
@@ -188,6 +221,28 @@ impl MangaView {
 
     fn url_of(&self, i: usize) -> String {
         self.visible[i]["url"].as_str().unwrap_or_default().to_string()
+    }
+
+    /// Unread chapters that aren't on disk or in the queue, oldest first so they finish in reading order.
+    fn unread_not_downloaded(&self, cx: &App) -> Vec<usize> {
+        let states = &crate::downloads::get(cx).read(cx).states;
+        (0..self.visible.len())
+            .rev()
+            .filter(|&i| !self.read.get(i).copied().unwrap_or(false) && !self.is_downloaded(i) && !states.contains_key(&self.url_of(i)))
+            .collect()
+    }
+
+    fn download_badge(&self, i: usize, cx: &App) -> Option<AnyElement> {
+        use crate::downloads::State;
+        let state = crate::downloads::get(cx).read(cx).states.get(&self.url_of(i)).cloned();
+        let text = |t: String, color: u32| mono(div()).flex_none().text_size(u(11.)).text_color(rgb(color)).child(t).into_any_element();
+        match state {
+            Some(State::Running(done, total)) => Some(text(format!("{done}/{total}"), crate::ACCENT_TEXT)),
+            Some(State::Queued) => Some(text("queued".into(), FAINT)),
+            Some(State::Failed(_)) => Some(text("failed".into(), crate::ACCENT_TEXT)),
+            None if self.is_downloaded(i) => Some(gpui::svg().path("icons/downloaded.svg").flex_none().size(u(13.)).text_color(rgb(FAINT)).into_any_element()),
+            None => None,
+        }
     }
 
     fn row_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -222,6 +277,27 @@ impl MangaView {
                 let url = this.url_of(i);
                 this.edit(cx, |s| s.toggle_bookmark(&url));
             })))
+            .map(|d| {
+                let url = self.url_of(i);
+                if crate::downloads::get(cx).read(cx).states.contains_key(&url) {
+                    d.child(item("cancel-download", "Cancel download".into()).on_click(cx.listener(move |this, _, _, cx| {
+                        let url = this.url_of(i);
+                        crate::downloads::get(cx).update(cx, |d, cx| d.cancel(&url, cx));
+                        this.row_menu = None;
+                    })))
+                } else if self.is_downloaded(i) {
+                    d.child(item("delete-download", "Delete download".into()).on_click(cx.listener(move |this, _, _, cx| {
+                        let job = this.job(i);
+                        crate::downloads::delete(&job.source, &job.title, &job.chapter);
+                        this.row_menu = None;
+                        this.refresh_downloaded(cx);
+                    })))
+                } else if self.source.installed {
+                    d.child(item("download", "Download".into()).on_click(cx.listener(move |this, _, _, cx| this.download(vec![i], cx))))
+                } else {
+                    d
+                }
+            })
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.row_menu = None;
                 cx.notify();
@@ -303,6 +379,7 @@ impl MangaView {
                                     )
                                     .when(!group.is_empty(), |d| d.child(div().truncate().text_size(u(12.)).text_color(rgb(FAINT)).child(group))),
                             )
+                            .children(self.download_badge(i, cx))
                             .child(mono(div()).flex_none().text_color(rgb(if read { FAINT } else { MUTED })).child(date))
                             .child(
                                 div()
@@ -500,6 +577,7 @@ impl MangaView {
             .unwrap_or_default();
         let title = self.text("title").unwrap_or_default();
         let has_chapters = !self.visible.is_empty();
+        let to_download = self.unread_not_downloaded(cx).len();
 
         div()
             .w_full()
@@ -589,6 +667,12 @@ impl MangaView {
                                 None => d,
                             }))
                             .when(installed && has_chapters, |d| d.child(pill("newest", "Newest chapter", false).on_click(cx.listener(|this, _, _, cx| this.read(0, 0, cx)))))
+                            .when(installed && to_download > 0, |d| {
+                                d.child(pill("download-unread", format!("Download {to_download} unread"), false).on_click(cx.listener(|this, _, _, cx| {
+                                    let rows = this.unread_not_downloaded(cx);
+                                    this.download(rows, cx)
+                                })))
+                            })
                             .child(
                                 pill("library", if in_library { "In library" } else { "+ Add to library" }, false)
                                     .when(in_library, |d| d.gap_2().child(crate::check(16., TEXT)).flex_row_reverse())

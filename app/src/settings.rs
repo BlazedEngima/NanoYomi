@@ -121,6 +121,33 @@ impl Render for Settings {
             )
             .child(div().flex_none().flex().gap(u(6.)).children(caps))
             .child(clear_pages);
+        let auto = self.store.read(cx).auto_download();
+        let auto_chip = |id: &'static str, label: &'static str, value: bool, store: Entity<Store>| {
+            small_button(id, label, auto == value).on_click(move |_, _, cx| store.update(cx, |s, cx| s.set_auto_download(value, cx)))
+        };
+        let folder = crate::downloads::dir().map(|d| d.display().to_string()).unwrap_or_default();
+        let downloads = div()
+            .w_full()
+            .py(u(14.))
+            .border_t_1()
+            .border_b_1()
+            .border_color(rgb(RULE))
+            .flex()
+            .items_center()
+            .gap_4()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(u(4.))
+                    .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child("Download new chapters"))
+                    .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(format!(
+                        "When Nano finds new chapters for series in your library, it downloads them for reading offline. Saved in {folder}"
+                    ))),
+            )
+            .child(div().flex_none().flex().gap(u(6.)).child(auto_chip("auto-off", "Off", false, self.store.clone())).child(auto_chip("auto-on", "On", true, self.store.clone())));
         let vertical = self.store.read(cx).vertical_reader();
         let mode_chip = |id: &'static str, label: &'static str, value: bool, store: Entity<Store>| {
             small_button(id, label, vertical == value).on_click(move |_, _, cx| store.update(cx, |s, cx| s.set_vertical_reader(value, cx)))
@@ -248,6 +275,8 @@ impl Render for Settings {
             .child(heading("Settings", ""))
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("READING"))
             .child(reading)
+            .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("DOWNLOADS"))
+            .child(downloads)
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("SYNC"))
             .child(sync)
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("CLOUDFLARE"))
