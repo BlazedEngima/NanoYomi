@@ -12,6 +12,7 @@ mod library;
 mod manga;
 mod migrate;
 mod page_cache;
+mod palette;
 mod reader;
 mod registry;
 mod rich;
@@ -252,6 +253,7 @@ struct Root {
     manga: Option<(Entity<MangaView>, Subscription)>,
     migrate: Option<(Entity<migrate::Migrate>, Subscription)>,
     reader: Option<(Entity<Reader>, Subscription)>,
+    palette: Option<palette::Palette>,
     focus: gpui::FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -283,7 +285,7 @@ impl Root {
             let store = store.clone();
             cx.new(|cx| settings::Settings::new(store, cx))
         });
-        Root { cache, store, registry, tab, library, browse, catalog: None, history: None, settings, manga: None, migrate: None, reader: None, focus, _subs: subs }
+        Root { cache, store, registry, tab, library, browse, catalog: None, history: None, settings, manga: None, migrate: None, reader: None, palette: None, focus, _subs: subs }
     }
 
     fn zoom_by(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -383,16 +385,12 @@ impl Root {
         cx.notify();
     }
 
-    fn search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show(Tab::Browse, window, cx);
-        self.browse.update(cx, |b, cx| b.search.update(cx, |s, cx| s.focus(window, cx)));
-    }
 }
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_rem_size(u(16.));
-        let root = div().size_full().flex().bg(rgb(BG)).text_color(rgb(TEXT)).font_family(SANS).text_size(u(14.));
+        let root = div().relative().size_full().flex().bg(rgb(BG)).text_color(rgb(TEXT)).font_family(SANS).text_size(u(14.));
         if let Some((reader, _)) = &self.reader {
             return root.child(reader.clone());
         }
@@ -415,7 +413,7 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &ShowExtensions, window, cx| this.show(Tab::Extensions, window, cx)))
             .on_action(cx.listener(|this, _: &ShowHistory, window, cx| this.show(Tab::History, window, cx)))
             .on_action(cx.listener(|this, _: &ShowSettings, window, cx| this.show(Tab::Settings, window, cx)))
-            .on_action(cx.listener(|this, _: &Search, window, cx| this.search(window, cx)))
+            .on_action(cx.listener(|this, _: &Search, window, cx| this.open_palette(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(0.1, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(-0.1, cx)))
@@ -428,6 +426,7 @@ impl Render for Root {
             }))
             .child(div().flex_1().min_w_0().h_full().child(screen))
             .children(panel)
+            .children(self.palette(cx))
     }
 }
 

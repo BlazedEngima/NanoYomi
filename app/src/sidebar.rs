@@ -129,7 +129,7 @@ impl Root {
                     div().font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).px(u(5.)).border_1().border_color(rgb(LINE)).rounded(u(4.)).child(if cfg!(target_os = "macos") { "⌘K" } else { "Ctrl K" }),
                 )
             })
-            .on_click(cx.listener(|this, _, window, cx| this.search(window, cx)));
+            .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)));
 
         let brand = div()
             .flex()
