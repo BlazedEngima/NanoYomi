@@ -1,0 +1,657 @@
+//! SyncYomi sync. Nano only changes its own fields, so everything else on the server survives.
+
+use crate::store::{Progress, Series, Store, now_ms};
+use gpui::{App, Entity};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Config {
+    pub host: String,
+    pub key: String,
+    pub device_id: String,
+    pub cursor: i64,
+}
+
+/// Nano's view of a series as last synced.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Meta {
+    sent: Snapshot,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+struct Snapshot {
+    in_library: bool,
+    progress: Option<(String, usize, i64)>,
+}
+
+impl Snapshot {
+    fn of(s: &Series) -> Self {
+        Snapshot { in_library: s.in_library, progress: s.progress.as_ref().map(|p| (p.chapter_url.clone(), p.page, p.at)) }
+    }
+}
+
+/// Changed here since the last sync.
+pub fn unsent(s: &Series) -> bool {
+    s.sync.as_ref().is_some_and(|m| m.sent != Snapshot::of(s))
+}
+
+fn dirty(s: &Series) -> bool {
+    !s.url().is_empty()
+        && match &s.sync {
+            Some(m) => m.sent != Snapshot::of(s),
+            None => s.in_library || s.progress.is_some(),
+        }
+}
+
+// Protobuf wire format, keeping unknown fields.
+
+#[derive(Clone, Debug, PartialEq)]
+enum Val {
+    Varint(u64),
+    Fixed64(u64),
+    Bytes(Vec<u8>),
+    Fixed32(u32),
+}
+
+#[derive(Clone, Default, Debug, PartialEq)]
+struct Msg(Vec<(u32, Val)>);
+
+fn varint(b: &[u8], i: &mut usize) -> Option<u64> {
+    let mut v = 0u64;
+    for shift in (0..64).step_by(7) {
+        let byte = *b.get(*i)?;
+        *i += 1;
+        v |= ((byte & 0x7f) as u64) << shift;
+        if byte < 0x80 {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn put_varint(out: &mut Vec<u8>, mut v: u64) {
+    while v >= 0x80 {
+        out.push(v as u8 | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+}
+
+impl Msg {
+    fn parse(b: &[u8]) -> Option<Msg> {
+        let (mut i, mut fields) = (0, vec![]);
+        while i < b.len() {
+            let tag = varint(b, &mut i)?;
+            let val = match tag & 7 {
+                0 => Val::Varint(varint(b, &mut i)?),
+                1 => {
+                    let v = u64::from_le_bytes(b.get(i..i + 8)?.try_into().ok()?);
+                    i += 8;
+                    Val::Fixed64(v)
+                }
+                2 => {
+                    let n = varint(b, &mut i)? as usize;
+                    let v = b.get(i..i.checked_add(n)?)?.to_vec();
+                    i += n;
+                    Val::Bytes(v)
+                }
+                5 => {
+                    let v = u32::from_le_bytes(b.get(i..i + 4)?.try_into().ok()?);
+                    i += 4;
+                    Val::Fixed32(v)
+                }
+                _ => return None,
+            };
+            fields.push(((tag >> 3) as u32, val));
+        }
+        Some(Msg(fields))
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut out = vec![];
+        for (n, v) in &self.0 {
+            let wire = match v {
+                Val::Varint(_) => 0,
+                Val::Fixed64(_) => 1,
+                Val::Bytes(_) => 2,
+                Val::Fixed32(_) => 5,
+            };
+            put_varint(&mut out, ((*n as u64) << 3) | wire);
+            match v {
+                Val::Varint(x) => put_varint(&mut out, *x),
+                Val::Fixed64(x) => out.extend(x.to_le_bytes()),
+                Val::Bytes(x) => {
+                    put_varint(&mut out, x.len() as u64);
+                    out.extend(x);
+                }
+                Val::Fixed32(x) => out.extend(x.to_le_bytes()),
+            }
+        }
+        out
+    }
+
+    fn get(&self, n: u32) -> Option<&Val> {
+        self.0.iter().rev().find(|(k, _)| *k == n).map(|(_, v)| v)
+    }
+
+    fn int(&self, n: u32) -> i64 {
+        match self.get(n) {
+            Some(Val::Varint(v)) => *v as i64,
+            _ => 0,
+        }
+    }
+
+    fn bool(&self, n: u32) -> Option<bool> {
+        match self.get(n) {
+            Some(Val::Varint(v)) => Some(*v != 0),
+            _ => None,
+        }
+    }
+
+    fn str(&self, n: u32) -> String {
+        match self.get(n) {
+            Some(Val::Bytes(b)) => String::from_utf8_lossy(b).into_owned(),
+            _ => String::new(),
+        }
+    }
+
+    fn f32(&self, n: u32) -> f32 {
+        match self.get(n) {
+            Some(Val::Fixed32(v)) => f32::from_bits(*v),
+            _ => 0.,
+        }
+    }
+
+    fn all(&self, n: u32) -> impl Iterator<Item = &[u8]> {
+        self.0.iter().filter(move |(k, _)| *k == n).filter_map(|(_, v)| if let Val::Bytes(b) = v { Some(b.as_slice()) } else { None })
+    }
+
+    fn without(&self, ns: &[u32]) -> Msg {
+        Msg(self.0.iter().filter(|(k, _)| !ns.contains(k)).cloned().collect())
+    }
+
+    fn set(&mut self, n: u32, v: Val) {
+        self.0.retain(|(k, _)| *k != n);
+        self.0.push((n, v));
+    }
+
+    fn set_int(&mut self, n: u32, v: i64) {
+        self.set(n, Val::Varint(v as u64));
+    }
+
+    fn set_str(&mut self, n: u32, s: &str) {
+        self.set(n, Val::Bytes(s.as_bytes().to_vec()));
+    }
+
+    fn push(&mut self, n: u32, m: &Msg) {
+        self.0.push((n, Val::Bytes(m.encode())));
+    }
+}
+
+// Field numbers from SyncYomi's backup.proto.
+const B_MANGA: u32 = 1;
+const B_SOURCES: u32 = 101;
+const M_SOURCE: u32 = 1;
+const M_URL: u32 = 2;
+const M_TITLE: u32 = 3;
+const M_ARTIST: u32 = 4;
+const M_AUTHOR: u32 = 5;
+const M_DESC: u32 = 6;
+const M_GENRE: u32 = 7;
+const M_STATUS: u32 = 8;
+const M_THUMB: u32 = 9;
+const M_ADDED: u32 = 13;
+const M_CHAPTERS: u32 = 16;
+const M_FAVORITE: u32 = 100;
+const M_HISTORY: u32 = 104;
+const M_MODIFIED: u32 = 106;
+const M_VERSION: u32 = 109;
+const C_URL: u32 = 1;
+const C_NAME: u32 = 2;
+const C_SCANLATOR: u32 = 3;
+const C_READ: u32 = 4;
+const C_PAGE: u32 = 6;
+const C_UPLOAD: u32 = 8;
+const C_NUMBER: u32 = 9;
+const C_ORDER: u32 = 10;
+const C_MODIFIED: u32 = 11;
+const C_VERSION: u32 = 12;
+const H_URL: u32 = 1;
+const H_READ_AT: u32 = 2;
+
+/// The server's copy of a series, kept in `sync/` because it's too big for library.json.
+#[derive(Clone, Default)]
+struct Raw {
+    manga: Msg,
+    chapters: HashMap<String, Msg>,
+}
+
+impl Raw {
+    /// A delta may only carry some of the chapters.
+    fn update(&mut self, m: &Msg) {
+        self.manga = m.without(&[M_CHAPTERS, M_HISTORY]);
+        for c in m.all(M_CHAPTERS).filter_map(Msg::parse) {
+            self.chapters.insert(c.str(C_URL), c);
+        }
+    }
+
+    fn path(dir: &Path, source: &str, url: &str) -> PathBuf {
+        // FNV-1a, because DefaultHasher can change between Rust versions.
+        let h = format!("{source}|{url}").bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+        dir.join(format!("{h:016x}.pb"))
+    }
+
+    fn load(dir: &Path, source: &str, url: &str) -> Option<Raw> {
+        let mut raw = Raw::default();
+        raw.update(&Msg::parse(&std::fs::read(Raw::path(dir, source, url)).ok()?)?);
+        Some(raw)
+    }
+
+    fn save(&self, dir: &Path, source: &str, url: &str) {
+        let mut m = self.manga.clone();
+        for c in self.chapters.values() {
+            m.push(M_CHAPTERS, c);
+        }
+        let path = Raw::path(dir, source, url);
+        let tmp = path.with_extension("tmp");
+        let result = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&tmp, m.encode())).and_then(|_| std::fs::rename(&tmp, &path));
+        if let Err(e) = result {
+            eprintln!("sync: save {}: {e}", path.display());
+        }
+    }
+}
+
+fn new_manga(s: &Series) -> Msg {
+    let mut m = Msg::default();
+    let text = |k: &str| s.manga[k].as_str().unwrap_or("").to_string();
+    m.set_int(M_SOURCE, s.source.parse::<u64>().unwrap_or(0) as i64);
+    m.set_str(M_URL, s.url());
+    m.set_str(M_TITLE, s.title());
+    for (n, k) in [(M_ARTIST, "artist"), (M_AUTHOR, "author"), (M_DESC, "description"), (M_THUMB, "thumbnailUrl")] {
+        if !text(k).is_empty() {
+            m.set_str(n, &text(k));
+        }
+    }
+    for g in text("genre").split(',').map(str::trim).filter(|g| !g.is_empty()) {
+        m.0.push((M_GENRE, Val::Bytes(g.as_bytes().to_vec())));
+    }
+    m.set_int(M_STATUS, s.manga["status"].as_i64().unwrap_or(0));
+    m
+}
+
+fn new_chapter(c: &Value, order: usize) -> Msg {
+    let mut m = Msg::default();
+    m.set_str(C_URL, c["url"].as_str().unwrap_or(""));
+    m.set_str(C_NAME, c["name"].as_str().unwrap_or(""));
+    if let Some(g) = c["scanlator"].as_str().filter(|g| !g.is_empty()) {
+        m.set_str(C_SCANLATOR, g);
+    }
+    m.set_int(C_UPLOAD, c["dateUpload"].as_i64().unwrap_or(0));
+    m.set(C_NUMBER, Val::Fixed32((c["chapterNumber"].as_f64().unwrap_or(-1.) as f32).to_bits()));
+    m.set_int(C_ORDER, order as i64);
+    m
+}
+
+/// The series to send, and the server's copy as it will be after.
+fn outgoing(s: &Series, raw: Option<Raw>, now: i64) -> (Msg, Raw) {
+    let secs = now / 1000;
+    let old = s.sync.as_ref().map(|m| &m.sent);
+    let mut raw = raw.unwrap_or_else(|| Raw { manga: new_manga(s), chapters: HashMap::new() });
+    if old.is_none_or(|o| o.in_library != s.in_library) {
+        let m = &mut raw.manga;
+        m.set_int(M_FAVORITE, s.in_library as i64);
+        if s.in_library && s.added_at > 0 {
+            m.set_int(M_ADDED, s.added_at);
+        }
+        m.set_int(M_VERSION, m.int(M_VERSION) + 1);
+        m.set_int(M_MODIFIED, secs);
+    }
+    let mut out = raw.manga.clone();
+    if let Some(p) = s.progress.as_ref().filter(|_| old.is_none_or(|o| o.progress != Snapshot::of(s).progress)) {
+        let visible = s.visible();
+        let reading = visible.iter().position(|c| c["url"] == p.chapter_url.as_str());
+        for (i, c) in visible.iter().enumerate() {
+            let url = c["url"].as_str().unwrap_or("");
+            let current = Some(i) == reading;
+            let want_read = reading.is_some_and(|r| i > r) || (current && p.pages > 0 && p.page + 1 >= p.pages);
+            let have = raw.chapters.get(url);
+            let (read, page) = have.map_or((false, 0), |m| (m.bool(C_READ).unwrap_or(false), m.int(C_PAGE)));
+            // Always send the current chapter once, so history has a chapter to point at.
+            if !(want_read && !read) && !(current && (page != p.page as i64 || have.is_none())) {
+                continue;
+            }
+            let order = s.chapters.iter().position(|x| x["url"] == url).unwrap_or(i);
+            let mut ch = have.cloned().unwrap_or_else(|| new_chapter(c, order));
+            if want_read {
+                ch.set_int(C_READ, 1);
+            }
+            if current {
+                ch.set_int(C_PAGE, p.page as i64);
+            }
+            ch.set_int(C_VERSION, ch.int(C_VERSION) + 1);
+            ch.set_int(C_MODIFIED, secs);
+            out.push(M_CHAPTERS, &ch);
+            raw.chapters.insert(url.to_string(), ch);
+        }
+        let mut h = Msg::default();
+        h.set_str(H_URL, &p.chapter_url);
+        h.set_int(H_READ_AT, p.at);
+        out.push(M_HISTORY, &h);
+    }
+    (out, raw)
+}
+
+/// Takes a server series into Nano. The newer reading position wins.
+fn incoming(series: &mut Vec<Series>, m: &Msg, raw: Option<Raw>, source_names: &HashMap<String, String>) -> Option<(usize, Raw)> {
+    let source = (m.int(M_SOURCE) as u64).to_string();
+    let url = m.str(M_URL);
+    let favorite = m.bool(M_FAVORITE).unwrap_or(true); // absent is true in Mihon's encoding
+    let ix = match series.iter().position(|s| s.source == source && s.url() == url) {
+        Some(ix) => ix,
+        None if favorite => {
+            let genre: Vec<String> = m.all(M_GENRE).map(|g| String::from_utf8_lossy(g).into_owned()).collect();
+            let manga = json!({
+                "url": url, "title": m.str(M_TITLE), "artist": m.str(M_ARTIST), "author": m.str(M_AUTHOR),
+                "description": m.str(M_DESC), "genre": genre.join(", "), "status": m.int(M_STATUS),
+                "thumbnailUrl": m.str(M_THUMB), "initialized": true,
+            });
+            let name = source_names.get(&source).cloned().unwrap_or_else(|| format!("Source {source}"));
+            series.push(Series::new(source.clone(), name, manga));
+            series.len() - 1
+        }
+        None => return None,
+    };
+    let mut raw = raw.unwrap_or_default();
+    raw.update(m);
+    let s = &mut series[ix];
+    if s.chapters.is_empty() {
+        let mut list: Vec<&Msg> = raw.chapters.values().collect();
+        list.sort_by_key(|c| c.int(C_ORDER));
+        s.chapters = list
+            .iter()
+            .map(|c| json!({ "url": c.str(C_URL), "name": c.str(C_NAME), "scanlator": c.str(C_SCANLATOR), "chapterNumber": c.f32(C_NUMBER), "dateUpload": c.int(C_UPLOAD) }))
+            .collect();
+    }
+    s.in_library = favorite;
+    if favorite && s.added_at == 0 {
+        s.added_at = m.int(M_ADDED);
+    }
+    let last = m.all(M_HISTORY).filter_map(Msg::parse).max_by_key(|h| h.int(H_READ_AT));
+    let server = last.map(|h| {
+        let url = h.str(H_URL);
+        let ch = raw.chapters.get(&url);
+        let page = ch.map_or(0, |c| c.int(C_PAGE).max(0) as usize);
+        let name = ch.map(|c| c.str(C_NAME)).unwrap_or_default();
+        Progress { chapter_url: url, chapter_name: name, page, pages: page + 1, at: h.int(H_READ_AT) }
+    });
+    let meta = s.sync.get_or_insert_with(Meta::default);
+    meta.sent.in_library = favorite;
+    if let Some(p) = server {
+        meta.sent.progress = Some((p.chapter_url.clone(), p.page, p.at));
+        if s.progress.as_ref().is_none_or(|l| p.at >= l.at) {
+            s.progress = Some(p);
+        }
+    }
+    Some((ix, raw))
+}
+
+fn decode(bytes: Vec<u8>, cursor: i64, full_requested: bool) -> Result<Reply, String> {
+    let backup = Msg::parse(&gunzip(bytes)?).ok_or("The server's backup couldn't be read")?;
+    let sources = backup.all(B_SOURCES).filter_map(Msg::parse).map(|s| ((s.int(2) as u64).to_string(), s.str(1))).collect();
+    let mangas = backup.all(B_MANGA).filter_map(Msg::parse).collect();
+    Ok(Reply { mangas, sources, cursor, full_requested })
+}
+
+fn gunzip(b: Vec<u8>) -> Result<Vec<u8>, String> {
+    if !b.starts_with(&[0x1f, 0x8b]) {
+        return Ok(b);
+    }
+    let mut out = vec![];
+    flate2::read::GzDecoder::new(&b[..]).read_to_end(&mut out).map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+struct Reply {
+    mangas: Vec<Msg>,
+    sources: HashMap<String, String>,
+    cursor: i64,
+    full_requested: bool,
+}
+
+fn status_error(e: ureq::Error) -> String {
+    match e {
+        ureq::Error::StatusCode(401) => "The server didn't accept the API key".to_string(),
+        ureq::Error::StatusCode(404) => "No SyncYomi v2 server at that address".to_string(),
+        e => e.to_string(),
+    }
+}
+
+/// The full library, or None if unchanged since `cursor`. Much faster than a merge.
+fn snapshot(cfg: &Config, cursor: i64) -> Result<Option<Reply>, String> {
+    let host = cfg.host.trim().trim_end_matches('/');
+    let mut res = ureq::get(format!("{host}/api/sync/v2/snapshot"))
+        .header("X-API-Token", cfg.key.trim())
+        .header("X-Device-ID", &cfg.device_id)
+        .header("X-Device-Name", "Nano")
+        .header("X-Sync-Cursor", cursor.to_string())
+        .call()
+        .map_err(status_error)?;
+    if res.status() == 304 {
+        return Ok(None);
+    }
+    let etag = res.headers().get("ETag").and_then(|v| v.to_str().ok()).unwrap_or("").trim_matches('"').to_string();
+    let cursor = etag.strip_prefix("seq=").and_then(|v| v.parse().ok()).ok_or("The server sent no sync cursor")?;
+    let bytes = res.body_mut().with_config().limit(512 << 20).read_to_vec().map_err(|e| e.to_string())?;
+    decode(bytes, cursor, false).map(Some)
+}
+
+fn merge(cfg: &Config, body: &Msg, full: bool) -> Result<Reply, String> {
+    let mut gz = flate2::write::GzEncoder::new(vec![], flate2::Compression::default());
+    gz.write_all(&body.encode()).map_err(|e| e.to_string())?;
+    let gz = gz.finish().map_err(|e| e.to_string())?;
+    let host = cfg.host.trim().trim_end_matches('/');
+    let mut res = ureq::post(format!("{host}/api/sync/v2/merge"))
+        .header("X-API-Token", cfg.key.trim())
+        .header("X-Device-ID", &cfg.device_id)
+        .header("X-Device-Name", "Nano")
+        .header("X-Sync-Cursor", if full { "0".into() } else { cfg.cursor.to_string() })
+        .header("X-Sync-Full", if full { "true" } else { "false" })
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Encoding", "gzip")
+        .send(&gz[..])
+        .map_err(status_error)?;
+    let header = |k: &str| res.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let cursor = header("X-Sync-Cursor").and_then(|v| v.parse().ok()).ok_or("The server sent no sync cursor")?;
+    let full_requested = header("X-Sync-Full-Requested").is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    let bytes = res.body_mut().with_config().limit(512 << 20).read_to_vec().map_err(|e| e.to_string())?;
+    decode(bytes, cursor, full_requested)
+}
+
+/// Uses the snapshot when there's nothing to send, and a merge when there is.
+pub fn run(store: Entity<Store>, cx: &mut App) {
+    let Some(cfg) = store.update(cx, |s, cx| s.start_sync(cx)) else { return };
+    cx.spawn(async move |cx| {
+        let mut cfg = cfg;
+        let result: Result<usize, String> = async {
+            let mut taken = 0;
+            let dirty = store.read_with(cx, |s, _| s.sync_dirty());
+            if cfg.cursor == 0 || !dirty {
+                let (c, cursor) = (cfg.clone(), cfg.cursor);
+                if let Some(reply) = cx.background_executor().spawn(async move { snapshot(&c, cursor) }).await? {
+                    cfg.cursor = reply.cursor;
+                    taken = store.update(cx, |s, cx| s.apply_sync(&reply, reply.cursor, cx));
+                }
+            }
+            if !store.read_with(cx, |s, _| s.sync_dirty()) {
+                return Ok(taken);
+            }
+            let (body, sent) = store.read_with(cx, |s, _| s.sync_outgoing());
+            let reply = cx.background_executor().spawn({ let cfg = cfg.clone(); async move { merge(&cfg, &body, false) } }).await?;
+            Ok(store.update(cx, |s, cx| {
+                s.mark_synced(sent, cx);
+                taken + s.apply_sync(&reply, if reply.full_requested { 0 } else { reply.cursor }, cx)
+            }))
+        }
+        .await;
+        store.update(cx, |s, cx| s.finish_sync(result, cx));
+    })
+    .detach();
+}
+
+pub struct Sent {
+    source: String,
+    url: String,
+    snapshot: Snapshot,
+    raw: Raw,
+}
+
+impl Store {
+    fn sync_dirty(&self) -> bool {
+        self.all_series().iter().any(dirty)
+    }
+
+    fn sync_dir(&self) -> PathBuf {
+        self.dir().join("sync")
+    }
+
+    fn sync_outgoing(&self) -> (Msg, Vec<Sent>) {
+        let (now, dir) = (now_ms(), self.sync_dir());
+        let mut body = Msg::default();
+        let mut sent = vec![];
+        let mut sources: HashMap<String, String> = HashMap::new();
+        for s in self.all_series().iter().filter(|s| dirty(s)) {
+            let raw = s.sync.as_ref().and_then(|_| Raw::load(&dir, &s.source, s.url()));
+            let (m, raw) = outgoing(s, raw, now);
+            body.push(B_MANGA, &m);
+            sources.insert(s.source.clone(), s.source_name.clone());
+            sent.push(Sent { source: s.source.clone(), url: s.url().to_string(), snapshot: Snapshot::of(s), raw });
+        }
+        for (id, name) in sources {
+            let mut src = Msg::default();
+            src.set_str(1, &name);
+            src.set_int(2, id.parse::<u64>().unwrap_or(0) as i64);
+            body.push(B_SOURCES, &src);
+        }
+        (body, sent)
+    }
+
+    pub fn mark_synced(&mut self, sent: Vec<Sent>, cx: &mut gpui::Context<Self>) {
+        let dir = self.sync_dir();
+        for s in &sent {
+            s.raw.save(&dir, &s.source, &s.url);
+        }
+        self.edit_series(cx, |series| {
+            for x in sent {
+                if let Some(s) = series.iter_mut().find(|s| s.source == x.source && s.url() == x.url) {
+                    s.sync = Some(Meta { sent: x.snapshot });
+                }
+            }
+        });
+    }
+
+    fn apply_sync(&mut self, reply: &Reply, cursor: i64, cx: &mut gpui::Context<Self>) -> usize {
+        let dir = self.sync_dir();
+        let mut taken = 0;
+        self.edit_series(cx, |series| {
+            for m in &reply.mangas {
+                let (source, url) = ((m.int(M_SOURCE) as u64).to_string(), m.str(M_URL));
+                let known = series.iter().any(|s| s.source == source && s.url() == url);
+                let raw = if known { Raw::load(&dir, &source, &url) } else { None };
+                if let Some((_, raw)) = incoming(series, m, raw, &reply.sources) {
+                    raw.save(&dir, &source, &url);
+                    taken += 1;
+                }
+            }
+        });
+        self.set_sync_cursor(cursor, cx);
+        taken
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn series() -> Series {
+        let mut s = Series::new("7537715367149829912".into(), "Comix".into(), json!({ "url": "/m", "title": "T" }));
+        s.chapters = (0..4).rev().map(|i| json!({ "url": format!("/c{i}"), "name": format!("Ch.{i}") })).collect();
+        s
+    }
+
+    #[test]
+    fn wire_round_trip_keeps_unknown_fields() {
+        let mut m = Msg::default();
+        m.set_int(1, 7537715367149829912);
+        m.set_str(2, "/m");
+        m.0.push((18, Val::Bytes(vec![8, 1]))); // a tracker Nano doesn't read
+        m.set(9000, Val::Fixed64(42));
+        let back = Msg::parse(&m.encode()).unwrap();
+        assert_eq!(back, m);
+        assert_eq!(back.int(1), 7537715367149829912);
+    }
+
+    #[test]
+    fn server_progress_comes_in_and_local_changes_go_out_on_its_bytes() {
+        // The phone's copy: in the library, reading /c1 at page 3, /c0 read, plus a tracker.
+        let mut ch0 = Msg::default();
+        ch0.set_str(C_URL, "/c0");
+        ch0.set_int(C_READ, 1);
+        ch0.set_int(C_VERSION, 5);
+        let mut ch1 = Msg::default();
+        ch1.set_str(C_URL, "/c1");
+        ch1.set_str(C_NAME, "Ch.1");
+        ch1.set_int(C_PAGE, 3);
+        ch1.set_int(5, 1); // bookmarked
+        ch1.set_int(C_VERSION, 2);
+        let mut h = Msg::default();
+        h.set_str(H_URL, "/c1");
+        h.set_int(H_READ_AT, 1000);
+        let mut m = new_manga(&series());
+        m.set_int(M_VERSION, 9);
+        m.0.push((18, Val::Bytes(vec![8, 1])));
+        m.push(M_CHAPTERS, &ch0);
+        m.push(M_CHAPTERS, &ch1);
+        m.push(M_HISTORY, &h);
+
+        let mut list = vec![];
+        let (_, raw) = incoming(&mut list, &m, None, &HashMap::new()).unwrap();
+        let s = &mut list[0];
+        assert!(s.in_library);
+        assert_eq!(s.progress.as_ref().map(|p| (p.chapter_url.as_str(), p.page)), Some(("/c1", 3)));
+        assert!(!dirty(s), "nothing changed here");
+
+        // Read on into /c2 here.
+        s.chapters = series().chapters;
+        s.progress = Some(Progress { chapter_url: "/c2".into(), chapter_name: "Ch.2".into(), page: 1, pages: 10, at: 4000 });
+        assert!(dirty(s));
+        let (out, _) = outgoing(s, Some(raw), 5000);
+        assert_eq!(out.int(M_VERSION), 9, "the series itself didn't change");
+        assert!(out.all(18).next().is_some(), "tracker kept");
+        let chs: Vec<Msg> = out.all(M_CHAPTERS).filter_map(Msg::parse).collect();
+        let by = |u: &str| chs.iter().find(|c| c.str(C_URL) == u).cloned();
+        let c1 = by("/c1").expect("/c1 now read");
+        assert_eq!((c1.bool(C_READ), c1.int(5), c1.int(C_VERSION)), (Some(true), 1, 3), "bookmark kept, version bumped");
+        assert_eq!(by("/c2").map(|c| c.int(C_PAGE)), Some(1));
+        assert!(by("/c0").is_none(), "already read there");
+        assert!(by("/c3").is_none());
+        let hist = Msg::parse(out.all(M_HISTORY).next().unwrap()).unwrap();
+        assert_eq!((hist.str(H_URL), hist.int(H_READ_AT)), ("/c2".into(), 4000));
+    }
+
+    #[test]
+    fn history_only_series_stay_on_the_server() {
+        let mut m = new_manga(&series());
+        m.set_int(M_FAVORITE, 0);
+        let mut h = Msg::default();
+        h.set_str(H_URL, "/c1");
+        h.set_int(H_READ_AT, 1000);
+        m.push(M_HISTORY, &h);
+        let mut list = vec![];
+        assert!(incoming(&mut list, &m, None, &HashMap::new()).is_none());
+        assert!(list.is_empty());
+    }
+}

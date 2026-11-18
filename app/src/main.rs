@@ -18,6 +18,7 @@ mod registry;
 mod rich;
 mod settings;
 mod store;
+mod sync;
 mod webviews;
 
 use browse::{Browse, OpenManga};
@@ -250,6 +251,7 @@ impl Root {
     fn new(host: Arc<Host>, data_dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cache = cx.new(|_| ImageCache::new(images::BUDGET_BYTES));
         let store = cx.new(|_| Store::load(data_dir.join("library.json")));
+        sync::run(store.clone(), cx);
         set_zoom(store.read(cx).zoom());
         page_cache::set_cap_mb(store.read(cx).page_cache_mb());
         let registry = cx.new(|cx| Registry::new(host, data_dir.clone(), cx));
@@ -364,6 +366,7 @@ impl Root {
         let sub = cx.subscribe_in(&reader, window, |this, reader, _: &ReaderEvent, window, cx| {
             reader.update(cx, |r, cx| r.release_all(Some(window), cx));
             this.reader = None;
+            sync::run(this.store.clone(), cx);
             this.focus.focus(window, cx);
             cx.notify();
         });

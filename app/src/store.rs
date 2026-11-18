@@ -21,6 +21,8 @@ pub struct Series {
     /// Until the user picks, only the main scanlator shows.
     #[serde(default)]
     pub scanlators_chosen: bool,
+    #[serde(default)]
+    pub sync: Option<crate::sync::Meta>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -33,6 +35,26 @@ pub struct Progress {
 }
 
 impl Series {
+    pub fn new(source: String, source_name: String, manga: Value) -> Self {
+        Series {
+            source,
+            source_name,
+            manga,
+            in_library: false,
+            added_at: 0,
+            chapters: vec![],
+            progress: None,
+            hidden_scanlators: vec![],
+            scanlators_chosen: false,
+            sync: None,
+        }
+    }
+
+    /// In the library, read, or with an unsynced change.
+    fn kept(&self) -> bool {
+        self.in_library || self.progress.is_some() || crate::sync::unsent(self)
+    }
+
     pub fn url(&self) -> &str {
         self.manga["url"].as_str().unwrap_or_default()
     }
@@ -125,12 +147,23 @@ struct Data {
     host_heap_mb: Option<u32>,
     #[serde(default)]
     vertical_reader: bool,
+    #[serde(default)]
+    sync: crate::sync::Config,
+}
+
+#[derive(Clone)]
+pub enum SyncStatus {
+    Idle,
+    Syncing,
+    Done(i64),
+    Failed(String),
 }
 
 pub struct Store {
     path: PathBuf,
     data: Data,
     saving: bool,
+    pub sync_status: SyncStatus,
 }
 
 pub fn now_ms() -> i64 {
@@ -143,7 +176,7 @@ impl Store {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).map_err(|e| eprintln!("{}: {e}", path.display())).ok())
             .unwrap_or_default();
-        Store { path, data, saving: false }
+        Store { path, data, saving: false, sync_status: SyncStatus::Idle }
     }
 
     pub fn get(&self, source: &str, url: &str) -> Option<&Series> {
@@ -174,25 +207,72 @@ impl Store {
         let ix = match self.data.series.iter().position(|s| s.source == source && s.url() == url) {
             Some(ix) => ix,
             None => {
-                self.data.series.push(Series {
-                    source: source.into(),
-                    source_name: source_name.into(),
-                    manga: manga.clone(),
-                    in_library: false,
-                    added_at: 0,
-                    chapters: vec![],
-                    progress: None,
-                    hidden_scanlators: vec![],
-                    scanlators_chosen: false,
-                });
+                self.data.series.push(Series::new(source.into(), source_name.into(), manga.clone()));
                 self.data.series.len() - 1
             }
         };
         let out = f(&mut self.data.series[ix]);
-        self.data.series.retain(|s| s.in_library || s.progress.is_some());
+        self.data.series.retain(Series::kept);
         self.save_soon(cx);
         cx.notify();
         out
+    }
+
+    pub fn dir(&self) -> std::path::PathBuf {
+        self.path.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+    }
+
+    pub fn all_series(&self) -> &[Series] {
+        &self.data.series
+    }
+
+    pub fn edit_series(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Vec<Series>)) {
+        f(&mut self.data.series);
+        self.data.series.retain(Series::kept);
+        self.save_soon(cx);
+        cx.notify();
+    }
+
+    pub fn sync_config(&self) -> &crate::sync::Config {
+        &self.data.sync
+    }
+
+    /// A new server or key starts over.
+    pub fn set_sync_account(&mut self, host: &str, key: &str, cx: &mut Context<Self>) {
+        let (host, key) = (host.trim().trim_end_matches('/'), key.trim());
+        if self.data.sync.host == host && self.data.sync.key == key {
+            return;
+        }
+        self.data.sync.host = host.into();
+        self.data.sync.key = key.into();
+        self.data.sync.cursor = 0;
+        self.edit_series(cx, |series| series.iter_mut().for_each(|s| s.sync = None));
+    }
+
+    pub fn set_sync_cursor(&mut self, cursor: i64, cx: &mut Context<Self>) {
+        self.data.sync.cursor = cursor;
+        self.save_soon(cx);
+    }
+
+    pub fn start_sync(&mut self, cx: &mut Context<Self>) -> Option<crate::sync::Config> {
+        let c = &mut self.data.sync;
+        if matches!(self.sync_status, SyncStatus::Syncing) || c.host.is_empty() || c.key.is_empty() {
+            return None;
+        }
+        if c.device_id.is_empty() {
+            c.device_id = format!("nano-{:x}-{:x}", now_ms(), std::process::id());
+        }
+        self.sync_status = SyncStatus::Syncing;
+        cx.notify();
+        Some(self.data.sync.clone())
+    }
+
+    pub fn finish_sync(&mut self, result: Result<usize, String>, cx: &mut Context<Self>) {
+        self.sync_status = match result {
+            Ok(_) => SyncStatus::Done(now_ms()),
+            Err(e) => SyncStatus::Failed(e),
+        };
+        cx.notify();
     }
 
     pub fn zoom(&self) -> f32 {
@@ -309,17 +389,9 @@ mod tests {
 
     #[test]
     fn unread_counts_chapters_newer_than_the_one_being_read() {
-        let mut s = Series {
-            source: "1".into(),
-            source_name: "S".into(),
-            manga: json!({ "url": "/m" }),
-            in_library: true,
-            added_at: 0,
-            chapters: (0..5).rev().map(|i| json!({ "url": format!("/c{i}") })).collect(),
-            progress: None,
-            hidden_scanlators: vec![],
-            scanlators_chosen: false,
-        };
+        let mut s = Series::new("1".into(), "S".into(), json!({ "url": "/m" }));
+        s.in_library = true;
+        s.chapters = (0..5).rev().map(|i| json!({ "url": format!("/c{i}") })).collect();
         assert_eq!(s.unread(), 0);
         s.progress = Some(Progress { chapter_url: "/c1".into(), chapter_name: "".into(), page: 0, pages: 1, at: 0 });
         assert_eq!(s.unread(), 3); // c4, c3, c2

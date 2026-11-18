@@ -16,13 +16,14 @@ pub struct TextInput {
     focus: FocusHandle,
     pub text: String,
     placeholder: SharedString,
+    pub icon: bool,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
 
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
-        TextInput { focus: cx.focus_handle(), text: String::new(), placeholder: placeholder.into() }
+        TextInput { focus: cx.focus_handle(), text: String::new(), placeholder: placeholder.into(), icon: true }
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -77,7 +78,7 @@ impl Render for TextInput {
             .items_center()
             .gap_2()
             .cursor_text()
-            .child(crate::search_icon())
+            .children(self.icon.then(crate::search_icon))
             .child({
                 let caret = || div().flex_none().w(u(2.)).h(u(18.)).bg(rgb(ACCENT));
                 let empty = self.text.is_empty();
