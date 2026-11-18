@@ -1,0 +1,341 @@
+//! What Nano remembers between runs, in one JSON file saved a second after each change.
+
+use gpui::Context;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::path::PathBuf;
+use std::time::Duration;
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Series {
+    pub source: String,
+    pub source_name: String,
+    pub manga: Value,
+    pub in_library: bool,
+    pub added_at: i64,
+    pub chapters: Vec<Value>,
+    pub progress: Option<Progress>,
+    /// Hidden scanlators (or languages, on multi-language sources).
+    #[serde(default)]
+    pub hidden_scanlators: Vec<String>,
+    /// Until the user picks, only the main scanlator shows.
+    #[serde(default)]
+    pub scanlators_chosen: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Progress {
+    pub chapter_url: String,
+    pub chapter_name: String,
+    pub page: usize,
+    pub pages: usize,
+    pub at: i64,
+}
+
+impl Series {
+    pub fn url(&self) -> &str {
+        self.manga["url"].as_str().unwrap_or_default()
+    }
+
+    pub fn title(&self) -> &str {
+        self.manga["title"].as_str().unwrap_or("Untitled")
+    }
+
+    pub fn visible(&self) -> Vec<Value> {
+        visible_chapters(&self.chapters, &self.hidden())
+    }
+
+    pub fn hidden(&self) -> Vec<String> {
+        if self.scanlators_chosen {
+            self.hidden_scanlators.clone()
+        } else {
+            default_hidden(&self.chapters, self.progress.as_ref().map(|p| p.chapter_url.as_str()))
+        }
+    }
+
+    pub fn reading_index(&self) -> Option<usize> {
+        let p = self.progress.as_ref()?;
+        self.visible().iter().position(|c| c["url"] == p.chapter_url.as_str())
+    }
+
+    /// How far through the series you are, from 0 to 1. The current chapter counts by page.
+    pub fn read_fraction(&self) -> Option<f32> {
+        let p = self.progress.as_ref()?;
+        let total = self.visible().len();
+        let i = self.reading_index()?;
+        let page = if p.pages == 0 { 0. } else { ((p.page + 1) as f32 / p.pages as f32).min(1.) };
+        Some(((total - i - 1) as f32 + page) / total as f32)
+    }
+
+    pub fn caught_up(&self) -> bool {
+        self.read_fraction().is_some_and(|f| f >= 1.)
+    }
+
+    pub fn unread(&self) -> usize {
+        self.reading_index().unwrap_or(0)
+    }
+
+    fn last_active(&self) -> i64 {
+        self.progress.as_ref().map_or(self.added_at, |p| p.at.max(self.added_at))
+    }
+}
+
+pub fn scanlator(c: &Value) -> &str {
+    c["scanlator"].as_str().filter(|s| !s.is_empty()).unwrap_or("Unknown")
+}
+
+pub fn scanlator_counts(chapters: &[Value]) -> Vec<(String, usize)> {
+    let mut groups: Vec<(String, usize)> = vec![];
+    for c in chapters {
+        let s = scanlator(c);
+        match groups.iter_mut().find(|(g, _)| g == s) {
+            Some((_, n)) => *n += 1,
+            None => groups.push((s.to_string(), 1)),
+        }
+    }
+    groups.sort_by_key(|(g, n)| (std::cmp::Reverse(*n), g.clone()));
+    groups
+}
+
+/// Before the user picks, show the group of the chapter being read, or else the biggest group.
+pub fn default_hidden(chapters: &[Value], reading_url: Option<&str>) -> Vec<String> {
+    let groups = scanlator_counts(chapters);
+    let reading = reading_url.and_then(|u| chapters.iter().find(|c| c["url"] == u)).map(scanlator);
+    let Some(keep) = reading.or(groups.first().map(|(g, _)| g.as_str())) else { return vec![] };
+    groups.iter().filter(|(g, _)| g != keep).map(|(g, _)| g.clone()).collect()
+}
+
+pub fn visible_chapters(chapters: &[Value], hidden: &[String]) -> Vec<Value> {
+    chapters.iter().filter(|c| !hidden.iter().any(|h| h == scanlator(c))).cloned().collect()
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct Data {
+    series: Vec<Series>,
+    #[serde(default)]
+    languages: std::collections::HashMap<String, Vec<String>>,
+    #[serde(default)]
+    zoom: Option<f32>,
+    #[serde(default)]
+    byparr_autostart: bool,
+    #[serde(default)]
+    page_cache_mb: Option<u32>,
+    /// Unset means sized for this machine.
+    #[serde(default)]
+    host_heap_mb: Option<u32>,
+    #[serde(default)]
+    vertical_reader: bool,
+}
+
+pub struct Store {
+    path: PathBuf,
+    data: Data,
+    saving: bool,
+}
+
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+impl Store {
+    pub fn load(path: PathBuf) -> Self {
+        let data = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).map_err(|e| eprintln!("{}: {e}", path.display())).ok())
+            .unwrap_or_default();
+        Store { path, data, saving: false }
+    }
+
+    pub fn get(&self, source: &str, url: &str) -> Option<&Series> {
+        self.data.series.iter().find(|s| s.source == source && s.url() == url)
+    }
+
+    pub fn library(&self) -> Vec<&Series> {
+        let mut list: Vec<_> = self.data.series.iter().filter(|s| s.in_library).collect();
+        list.sort_by_key(|s| -s.last_active());
+        list
+    }
+
+    pub fn history(&self) -> Vec<&Series> {
+        let mut list: Vec<_> = self.data.series.iter().filter(|s| s.progress.is_some()).collect();
+        list.sort_by_key(|s| -s.progress.as_ref().map_or(0, |p| p.at));
+        list
+    }
+
+    pub fn update<T>(
+        &mut self,
+        source: &str,
+        source_name: &str,
+        manga: &Value,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Series) -> T,
+    ) -> T {
+        let url = manga["url"].as_str().unwrap_or_default();
+        let ix = match self.data.series.iter().position(|s| s.source == source && s.url() == url) {
+            Some(ix) => ix,
+            None => {
+                self.data.series.push(Series {
+                    source: source.into(),
+                    source_name: source_name.into(),
+                    manga: manga.clone(),
+                    in_library: false,
+                    added_at: 0,
+                    chapters: vec![],
+                    progress: None,
+                    hidden_scanlators: vec![],
+                    scanlators_chosen: false,
+                });
+                self.data.series.len() - 1
+            }
+        };
+        let out = f(&mut self.data.series[ix]);
+        self.data.series.retain(|s| s.in_library || s.progress.is_some());
+        self.save_soon(cx);
+        cx.notify();
+        out
+    }
+
+    pub fn zoom(&self) -> f32 {
+        self.data.zoom.unwrap_or(1.)
+    }
+
+    pub fn set_zoom(&mut self, z: f32, cx: &mut Context<Self>) {
+        self.data.zoom = Some(z);
+        self.save_soon(cx);
+    }
+
+    pub fn byparr_autostart(&self) -> bool {
+        self.data.byparr_autostart
+    }
+
+    pub fn set_byparr_autostart(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.data.byparr_autostart = on;
+        self.save_soon(cx);
+        cx.notify();
+    }
+
+    pub fn vertical_reader(&self) -> bool {
+        self.data.vertical_reader
+    }
+
+    pub fn set_vertical_reader(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.data.vertical_reader != on {
+            self.data.vertical_reader = on;
+            self.save_soon(cx);
+            cx.notify();
+        }
+    }
+
+    pub fn host_heap_mb(&self) -> Option<u32> {
+        self.data.host_heap_mb
+    }
+
+    pub fn set_host_heap_mb(&mut self, mb: Option<u32>, cx: &mut Context<Self>) {
+        self.data.host_heap_mb = mb;
+        self.save_soon(cx);
+        cx.notify();
+    }
+
+    pub fn page_cache_mb(&self) -> u32 {
+        self.data.page_cache_mb.unwrap_or(crate::page_cache::DEFAULT_MB)
+    }
+
+    pub fn set_page_cache_mb(&mut self, mb: u32, cx: &mut Context<Self>) {
+        self.data.page_cache_mb = Some(mb);
+        crate::page_cache::set_cap_mb(mb);
+        self.save_soon(cx);
+        cx.notify();
+    }
+
+        pub fn languages(&self, pkg: &str) -> Option<&Vec<String>> {
+        self.data.languages.get(pkg)
+    }
+
+    pub fn set_languages(&mut self, pkg: &str, langs: Vec<String>, cx: &mut Context<Self>) {
+        self.data.languages.insert(pkg.to_string(), langs);
+        self.save_soon(cx);
+        cx.notify();
+    }
+
+    fn save_soon(&mut self, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
+        self.saving = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let Ok((path, bytes)) = this.update(cx, |s, _| {
+                s.saving = false;
+                (s.path.clone(), serde_json::to_vec(&s.data).unwrap_or_default())
+            }) else {
+                return;
+            };
+            let tmp = path.with_extension("tmp");
+            if let Err(e) = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &path)) {
+                eprintln!("save {}: {e}", path.display());
+            }
+        })
+        .detach();
+    }
+}
+
+pub fn ago(ms: i64, now: i64) -> String {
+    let mins = (now - ms).max(0) / 60_000;
+    match mins {
+        0 => "just now".into(),
+        1..60 => format!("{mins} min ago"),
+        60..1440 => format!("{} h ago", mins / 60),
+        1440..2880 => "Yesterday".into(),
+        2880..10080 => format!("{} days ago", mins / 1440),
+        _ => crate::manga::ymd(ms),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn relative_times() {
+        let now = 1_763_337_600_000;
+        assert_eq!(ago(now - 30_000, now), "just now");
+        assert_eq!(ago(now - 5 * 60_000, now), "5 min ago");
+        assert_eq!(ago(now - 3 * 3_600_000, now), "3 h ago");
+        assert_eq!(ago(now - 30 * 3_600_000, now), "Yesterday");
+        assert_eq!(ago(now - 4 * 86_400_000, now), "4 days ago");
+        assert_eq!(ago(now - 40 * 86_400_000, now), "2025-10-08");
+    }
+
+    #[test]
+    fn unread_counts_chapters_newer_than_the_one_being_read() {
+        let mut s = Series {
+            source: "1".into(),
+            source_name: "S".into(),
+            manga: json!({ "url": "/m" }),
+            in_library: true,
+            added_at: 0,
+            chapters: (0..5).rev().map(|i| json!({ "url": format!("/c{i}") })).collect(),
+            progress: None,
+            hidden_scanlators: vec![],
+            scanlators_chosen: false,
+        };
+        assert_eq!(s.unread(), 0);
+        s.progress = Some(Progress { chapter_url: "/c1".into(), chapter_name: "".into(), page: 0, pages: 1, at: 0 });
+        assert_eq!(s.unread(), 3); // c4, c3, c2
+        s.progress = Some(Progress { chapter_url: "/c1".into(), chapter_name: "".into(), page: 0, pages: 2, at: 0 });
+        assert_eq!(s.read_fraction(), Some(0.3));
+        assert!(!s.caught_up());
+        s.progress = Some(Progress { chapter_url: "/c4".into(), chapter_name: "".into(), page: 1, pages: 2, at: 0 });
+        assert!(s.caught_up());
+    }
+
+    #[test]
+    fn default_filter_keeps_the_main_or_current_group() {
+        let ch = |url: &str, g: &str| json!({ "url": url, "scanlator": g });
+        let chapters = vec![ch("/1", "A"), ch("/2", "B"), ch("/3", "B"), ch("/4", "")];
+        assert_eq!(default_hidden(&chapters, None), vec!["A".to_string(), "Unknown".to_string()]);
+        assert_eq!(default_hidden(&chapters, Some("/1")), vec!["B".to_string(), "Unknown".to_string()]);
+        assert!(default_hidden(&[], None).is_empty());
+    }
+}
