@@ -27,11 +27,20 @@ pub struct Meta {
 struct Snapshot {
     in_library: bool,
     progress: Option<(String, usize, i64)>,
+    #[serde(default)]
+    marks: std::collections::BTreeMap<String, bool>,
+    #[serde(default)]
+    bookmarks: std::collections::BTreeSet<String>,
 }
 
 impl Snapshot {
     fn of(s: &Series) -> Self {
-        Snapshot { in_library: s.in_library, progress: s.progress.as_ref().map(|p| (p.chapter_url.clone(), p.page, p.at)) }
+        Snapshot {
+            in_library: s.in_library,
+            progress: s.progress.as_ref().map(|p| (p.chapter_url.clone(), p.page, p.at)),
+            marks: s.marks.clone(),
+            bookmarks: s.bookmarks.clone(),
+        }
     }
 }
 
@@ -44,7 +53,7 @@ fn dirty(s: &Series) -> bool {
     !s.url().is_empty()
         && match &s.sync {
             Some(m) => m.sent != Snapshot::of(s),
-            None => s.in_library || s.progress.is_some(),
+            None => s.in_library || s.progress.is_some() || !s.marks.is_empty() || !s.bookmarks.is_empty(),
         }
 }
 
@@ -215,6 +224,7 @@ const C_URL: u32 = 1;
 const C_NAME: u32 = 2;
 const C_SCANLATOR: u32 = 3;
 const C_READ: u32 = 4;
+const C_BOOKMARK: u32 = 5;
 const C_PAGE: u32 = 6;
 const C_UPLOAD: u32 = 8;
 const C_NUMBER: u32 = 9;
@@ -312,32 +322,45 @@ fn outgoing(s: &Series, raw: Option<Raw>, now: i64) -> (Msg, Raw) {
         m.set_int(M_MODIFIED, secs);
     }
     let mut out = raw.manga.clone();
-    if let Some(p) = s.progress.as_ref().filter(|_| old.is_none_or(|o| o.progress != Snapshot::of(s).progress)) {
-        let visible = s.visible();
-        let reading = visible.iter().position(|c| c["url"] == p.chapter_url.as_str());
-        for (i, c) in visible.iter().enumerate() {
-            let url = c["url"].as_str().unwrap_or("");
-            let current = Some(i) == reading;
-            let want_read = reading.is_some_and(|r| i > r) || (current && p.pages > 0 && p.page + 1 >= p.pages);
-            let have = raw.chapters.get(url);
-            let (read, page) = have.map_or((false, 0), |m| (m.bool(C_READ).unwrap_or(false), m.int(C_PAGE)));
-            // Always send the current chapter once, so history has a chapter to point at.
-            if !(want_read && !read) && !(current && (page != p.page as i64 || have.is_none())) {
-                continue;
-            }
-            let order = s.chapters.iter().position(|x| x["url"] == url).unwrap_or(i);
-            let mut ch = have.cloned().unwrap_or_else(|| new_chapter(c, order));
-            if want_read {
-                ch.set_int(C_READ, 1);
-            }
-            if current {
-                ch.set_int(C_PAGE, p.page as i64);
-            }
-            ch.set_int(C_VERSION, ch.int(C_VERSION) + 1);
-            ch.set_int(C_MODIFIED, secs);
-            out.push(M_CHAPTERS, &ch);
-            raw.chapters.insert(url.to_string(), ch);
+    // Same fields as Mihon's backup: read (4), bookmark (5) and last page read (6), each with a version bump.
+    let visible = s.visible();
+    let read = s.read_flags(&visible);
+    let p = s.progress.as_ref();
+    let reading = p.and_then(|p| visible.iter().position(|c| c["url"] == p.chapter_url.as_str()));
+    let progress_moved = old.is_none_or(|o| o.progress != Snapshot::of(s).progress);
+    for (i, c) in visible.iter().enumerate() {
+        let url = c["url"].as_str().unwrap_or("");
+        let current = progress_moved && Some(i) == reading;
+        let have = raw.chapters.get(url);
+        let (was_read, page, was_marked) =
+            have.map_or((false, 0, false), |m| (m.bool(C_READ).unwrap_or(false), m.int(C_PAGE), m.bool(C_BOOKMARK).unwrap_or(false)));
+        // Only an explicit unread here clears a read from the phone.
+        let unread_here = s.marks.get(url) == Some(&false);
+        let send_read = (read[i] && !was_read) || (unread_here && was_read);
+        let bookmarked = s.bookmarks.contains(url);
+        let page_now = p.map_or(0, |p| p.page as i64);
+        // Always send the current chapter once, so history has a chapter to point at.
+        let send_page = current && (page != page_now || have.is_none());
+        if !send_read && bookmarked == was_marked && !send_page {
+            continue;
         }
+        let order = s.chapters.iter().position(|x| x["url"] == url).unwrap_or(i);
+        let mut ch = have.cloned().unwrap_or_else(|| new_chapter(c, order));
+        if send_read {
+            ch.set_int(C_READ, read[i] as i64);
+        }
+        if bookmarked != was_marked {
+            ch.set_int(C_BOOKMARK, bookmarked as i64);
+        }
+        if send_page {
+            ch.set_int(C_PAGE, page_now);
+        }
+        ch.set_int(C_VERSION, ch.int(C_VERSION) + 1);
+        ch.set_int(C_MODIFIED, secs);
+        out.push(M_CHAPTERS, &ch);
+        raw.chapters.insert(url.to_string(), ch);
+    }
+    if let Some(p) = p.filter(|_| progress_moved) {
         let mut h = Msg::default();
         h.set_str(H_URL, &p.chapter_url);
         h.set_int(H_READ_AT, p.at);
@@ -389,8 +412,31 @@ fn incoming(series: &mut Vec<Series>, m: &Msg, raw: Option<Raw>, source_names: &
         let name = ch.map(|c| c.str(C_NAME)).unwrap_or_default();
         Progress { chapter_url: url, chapter_name: name, page, pages: page + 1, at: h.int(H_READ_AT) }
     });
+    // Read flags and bookmarks from other devices. Absence never clears one, like the rest of sync.
+    let visible = s.visible();
+    let derived = s.read_flags(&visible);
+    for c in m.all(M_CHAPTERS).filter_map(Msg::parse) {
+        let url = c.str(C_URL);
+        if c.bool(C_BOOKMARK) == Some(true) {
+            s.bookmarks.insert(url.clone());
+        } else if c.bool(C_BOOKMARK) == Some(false) {
+            s.bookmarks.remove(&url);
+        }
+        let read_here = visible.iter().position(|v| v["url"] == url.as_str()).map(|i| derived[i]);
+        match c.bool(C_READ) {
+            Some(true) if read_here != Some(true) => {
+                s.marks.insert(url, true);
+            }
+            Some(false) if s.marks.get(&url) == Some(&true) => {
+                s.marks.remove(&url);
+            }
+            _ => {}
+        }
+    }
     let meta = s.sync.get_or_insert_with(Meta::default);
     meta.sent.in_library = favorite;
+    meta.sent.marks = s.marks.clone();
+    meta.sent.bookmarks = s.bookmarks.clone();
     if let Some(p) = server {
         meta.sent.progress = Some((p.chapter_url.clone(), p.page, p.at));
         if s.progress.as_ref().is_none_or(|l| p.at >= l.at) {
@@ -645,6 +691,40 @@ mod tests {
         assert!(by("/c3").is_none());
         let hist = Msg::parse(out.all(M_HISTORY).next().unwrap()).unwrap();
         assert_eq!((hist.str(H_URL), hist.int(H_READ_AT)), ("/c2".into(), 4000));
+    }
+
+    #[test]
+    fn marks_and_bookmarks_use_mihons_chapter_fields() {
+        // The phone read /c3 and bookmarked /c2, and we're reading /c1.
+        let mut ch3 = Msg::default();
+        ch3.set_str(C_URL, "/c3");
+        ch3.set_int(C_READ, 1);
+        let mut ch2 = Msg::default();
+        ch2.set_str(C_URL, "/c2");
+        ch2.set_int(C_BOOKMARK, 1);
+        let mut m = new_manga(&series());
+        m.push(M_CHAPTERS, &ch3);
+        m.push(M_CHAPTERS, &ch2);
+        let mut list = vec![series()];
+        list[0].in_library = true;
+        list[0].progress = Some(Progress { chapter_url: "/c1".into(), chapter_name: "".into(), page: 0, pages: 5, at: 1 });
+        let (_, raw) = incoming(&mut list, &m, None, &HashMap::new()).unwrap();
+        let s = &mut list[0];
+        assert_eq!(s.marks.get("/c3"), Some(&true), "read on the phone, so read here too");
+        assert!(s.bookmarks.contains("/c2"));
+
+        // Here: unread /c3 again, bookmark /c0, unbookmark /c2.
+        s.mark(&["/c3".into()], false);
+        s.toggle_bookmark("/c0");
+        s.toggle_bookmark("/c2");
+        let (out, _) = outgoing(s, Some(raw), 9000);
+        let chs: Vec<Msg> = out.all(M_CHAPTERS).filter_map(Msg::parse).collect();
+        let by = |u: &str| chs.iter().find(|c| c.str(C_URL) == u).cloned();
+        assert_eq!(by("/c3").map(|c| (c.bool(C_READ), c.int(C_VERSION))), Some((Some(false), 1)));
+        assert_eq!(by("/c0").and_then(|c| c.bool(C_BOOKMARK)), Some(true));
+        assert_eq!(by("/c2").and_then(|c| c.bool(C_BOOKMARK)), Some(false));
+        // /c0 is before the current chapter, so it goes up as read too, as Mihon would show it.
+        assert_eq!(by("/c0").and_then(|c| c.bool(C_READ)), Some(true));
     }
 
     #[test]

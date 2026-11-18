@@ -101,6 +101,7 @@ impl gpui::AssetSource for Assets {
         Ok(match path {
             "icons/search.svg" => Some(include_bytes!("../assets/icons/search.svg").as_slice().into()),
             "icons/chevron.svg" => Some(include_bytes!("../assets/icons/chevron.svg").as_slice().into()),
+            "icons/bookmark.svg" => Some(include_bytes!("../assets/icons/bookmark.svg").as_slice().into()),
             "icons/check.svg" => Some(include_bytes!("../assets/icons/check.svg").as_slice().into()),
             "icons/sidebar.svg" => Some(include_bytes!("../assets/icons/sidebar.svg").as_slice().into()),
             _ => None,

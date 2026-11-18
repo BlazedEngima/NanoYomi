@@ -56,6 +56,11 @@ pub struct MangaView {
     zoom_seen: f32,
     items: Vec<Item>,
     status: SharedString,
+    /// Read state of each chapter in `visible`, and the bookmarked urls, from the saved record.
+    read: Vec<bool>,
+    bookmarks: std::collections::BTreeSet<String>,
+    /// The chapter whose actions menu is open, and where.
+    row_menu: Option<(usize, gpui::Point<gpui::Pixels>)>,
     _subs: Vec<Subscription>,
 }
 
@@ -121,6 +126,9 @@ impl MangaView {
             zoom_seen: 0.,
             list: ListState::new(0, ListAlignment::Top, u(800.)),
             items: vec![],
+            read: vec![],
+            bookmarks: Default::default(),
+            row_menu: None,
             status: status.into(),
             _subs: subs,
         }
@@ -168,6 +176,59 @@ impl MangaView {
         cx.notify();
     }
 
+    /// Changes the saved record, creating it if needed.
+    fn edit(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut crate::store::Series)) {
+        let (source, manga) = (self.source.clone(), self.manga.clone());
+        self.store.update(cx, |store, cx| store.update(&source.id, &source.name, &manga, cx, |_| {}));
+        self.save(cx, f);
+        self.row_menu = None;
+        crate::sync::run(self.store.clone(), cx);
+        cx.notify();
+    }
+
+    fn url_of(&self, i: usize) -> String {
+        self.visible[i]["url"].as_str().unwrap_or_default().to_string()
+    }
+
+    fn row_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (i, at) = self.row_menu?;
+        let read = self.read.get(i).copied().unwrap_or(false);
+        let bookmarked = self.bookmarks.contains(&self.url_of(i));
+        let older = self.visible.len().saturating_sub(i + 1);
+        let item = |id: &'static str, label: String| {
+            div().id(id).px(u(12.)).py(u(7.)).rounded(u(6.)).text_size(u(13.)).cursor_pointer().hover(|s| s.bg(rgb(crate::HOVER))).child(label)
+        };
+        let menu = div()
+            .id("chapter-actions")
+            .occlude()
+            .w(u(230.))
+            .p(u(5.))
+            .rounded(u(10.))
+            .border_1()
+            .border_color(rgb(LINE))
+            .bg(rgb(SURFACE))
+            .shadow_lg()
+            .child(item("mark", if read { "Mark as unread".into() } else { "Mark as read".into() }).on_click(cx.listener(move |this, _, _, cx| {
+                let url = this.url_of(i);
+                this.edit(cx, |s| s.mark(&[url], !read));
+            })))
+            .when(older > 0, |d| {
+                d.child(item("mark-older", format!("Mark the {older} before it as read")).on_click(cx.listener(move |this, _, _, cx| {
+                    let urls: Vec<String> = (i + 1..this.visible.len()).map(|j| this.url_of(j)).collect();
+                    this.edit(cx, |s| s.mark(&urls, true));
+                })))
+            })
+            .child(item("bookmark", if bookmarked { "Remove bookmark".into() } else { "Bookmark".into() }).on_click(cx.listener(move |this, _, _, cx| {
+                let url = this.url_of(i);
+                this.edit(cx, |s| s.toggle_bookmark(&url));
+            })))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.row_menu = None;
+                cx.notify();
+            }));
+        Some(gpui::deferred(gpui::anchored().position(at).snap_to_window_with_margin(u(8.)).child(menu)).with_priority(2).into_any_element())
+    }
+
     fn read(&mut self, index: usize, page: usize, cx: &mut Context<Self>) {
         cx.emit(MangaEvent::Read { chapters: self.visible.clone(), index, page });
     }
@@ -207,12 +268,17 @@ impl MangaView {
                 let name: SharedString = ch["name"].as_str().unwrap_or("Chapter").to_string().into();
                 let date = ch["dateUpload"].as_i64().filter(|ms| *ms > 0).map(ymd).unwrap_or_default();
                 let group = ch["scanlator"].as_str().unwrap_or("").to_string();
+                let read = self.read.get(i).copied().unwrap_or(false);
+                let bookmarked = ch["url"].as_str().is_some_and(|u| self.bookmarks.contains(u));
+                let open = self.row_menu.is_some_and(|(m, _)| m == i);
                 div()
                     .w_full()
                     .px(u(PAD))
                     .child(
                         div()
                             .id(("chapter", i))
+                            .group("chapter-row")
+                            .when(open, |d| d.bg(rgb(SURFACE)))
                             .w_full()
                             .flex()
                             .items_center()
@@ -227,10 +293,43 @@ impl MangaView {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(div().truncate().font_weight(FontWeight::MEDIUM).child(name))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(u(6.))
+                                            .when(bookmarked, |d| d.child(gpui::svg().path("icons/bookmark.svg").flex_none().size(u(12.)).text_color(rgb(crate::ACCENT))))
+                                            .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_color(rgb(if read { FAINT } else { crate::TEXT })).child(name)),
+                                    )
                                     .when(!group.is_empty(), |d| d.child(div().truncate().text_size(u(12.)).text_color(rgb(FAINT)).child(group))),
                             )
-                            .child(mono(div()).flex_none().text_color(rgb(MUTED)).child(date))
+                            .child(mono(div()).flex_none().text_color(rgb(if read { FAINT } else { MUTED })).child(date))
+                            .child(
+                                div()
+                                    .id(("more", i))
+                                    .flex_none()
+                                    .w(u(24.))
+                                    .h(u(24.))
+                                    .rounded(u(6.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(rgb(MUTED))
+                                    .invisible()
+                                    .when(open, |d| d.visible())
+                                    .group_hover("chapter-row", |s| s.visible())
+                                    .hover(|s| s.bg(rgb(crate::HOVER)).text_color(rgb(crate::TEXT)))
+                                    .child("⋯")
+                                    .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.row_menu = if this.row_menu.is_some_and(|(m, _)| m == i) { None } else { Some((i, ev.position())) };
+                                        cx.notify();
+                                    })),
+                            )
+                            .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                                this.row_menu = Some((i, ev.position));
+                                cx.notify();
+                            }))
                             .on_click(cx.listener(move |this, _, _, cx| this.read(i, 0, cx))),
                     )
                     .into_any_element()
@@ -515,6 +614,9 @@ impl Render for MangaView {
             self.list.remeasure();
         }
         self.visible = Arc::new(visible_chapters(&self.chapters, &self.hidden));
+        let saved = self.store.read(cx).get(&self.source.id, self.url());
+        self.read = saved.map_or_else(|| vec![false; self.visible.len()], |s| s.read_flags(&self.visible));
+        self.bookmarks = saved.map(|s| s.bookmarks.clone()).unwrap_or_default();
         let query = self.search.read(cx).text.trim().to_lowercase();
         self.rows = (0..self.visible.len())
             .filter(|&i| query.is_empty() || self.visible[i]["name"].as_str().unwrap_or("").to_lowercase().contains(&query))
@@ -534,10 +636,12 @@ impl Render for MangaView {
         self.list.remeasure_items(0..3.min(items.len()));
         self.items = items;
         let this = cx.entity();
+        let menu = self.row_menu(cx);
         div()
             .size_full()
             .pb(u(24.))
             .child(list(self.list.clone(), move |ix, _, cx| this.update(cx, |this, cx| this.item(ix, cx))).size_full())
+            .children(menu)
     }
 }
 

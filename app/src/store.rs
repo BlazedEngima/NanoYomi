@@ -23,6 +23,12 @@ pub struct Series {
     pub scanlators_chosen: bool,
     #[serde(default)]
     pub sync: Option<crate::sync::Meta>,
+    /// Chapters marked read (true) or unread (false) by hand, by url. They win over what the progress implies.
+    #[serde(default)]
+    pub marks: std::collections::BTreeMap<String, bool>,
+    /// Bookmarked chapters, by url.
+    #[serde(default)]
+    pub bookmarks: std::collections::BTreeSet<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -47,12 +53,14 @@ impl Series {
             hidden_scanlators: vec![],
             scanlators_chosen: false,
             sync: None,
+            marks: Default::default(),
+            bookmarks: Default::default(),
         }
     }
 
     /// In the library, read, or with an unsynced change.
     fn kept(&self) -> bool {
-        self.in_library || self.progress.is_some() || crate::sync::unsent(self)
+        self.in_library || self.progress.is_some() || !self.marks.is_empty() || !self.bookmarks.is_empty() || crate::sync::unsent(self)
     }
 
     pub fn url(&self) -> &str {
@@ -89,12 +97,53 @@ impl Series {
         Some(((total - i - 1) as f32 + page) / total as f32)
     }
 
+    /// Whether each chapter in `list` (newest first) is read: older than the one being read, finished, or marked by hand.
+    pub fn read_flags(&self, list: &[Value]) -> Vec<bool> {
+        let p = self.progress.as_ref();
+        let reading = p.and_then(|p| list.iter().position(|c| c["url"] == p.chapter_url.as_str()));
+        let finished = p.is_some_and(|p| p.pages > 0 && p.page + 1 >= p.pages);
+        list.iter()
+            .enumerate()
+            .map(|(i, c)| match self.marks.get(c["url"].as_str().unwrap_or_default()) {
+                Some(read) => *read,
+                None => reading.is_some_and(|r| i > r || (i == r && finished)),
+            })
+            .collect()
+    }
+
+    /// Whether each chapter counts as new: newer than the one being read, or marked unread.
+    /// An unstarted series has nothing new, so its whole list isn't a backlog.
+    pub fn new_flags(&self, list: &[Value]) -> Vec<bool> {
+        let reading = self.progress.as_ref().and_then(|p| list.iter().position(|c| c["url"] == p.chapter_url.as_str()));
+        list.iter()
+            .enumerate()
+            .map(|(i, c)| match self.marks.get(c["url"].as_str().unwrap_or_default()) {
+                Some(read) => !read,
+                None => reading.is_some_and(|r| i < r),
+            })
+            .collect()
+    }
+
     pub fn caught_up(&self) -> bool {
-        self.read_fraction().is_some_and(|f| f >= 1.)
+        let list = self.visible();
+        (self.progress.is_some() || !self.marks.is_empty()) && !list.is_empty() && self.read_flags(&list).iter().all(|r| *r)
     }
 
     pub fn unread(&self) -> usize {
-        self.reading_index().unwrap_or(0)
+        self.new_flags(&self.visible()).iter().filter(|n| **n).count()
+    }
+
+    /// Marks chapters read or unread by hand.
+    pub fn mark(&mut self, urls: &[String], read: bool) {
+        for url in urls {
+            self.marks.insert(url.clone(), read);
+        }
+    }
+
+    pub fn toggle_bookmark(&mut self, url: &str) {
+        if !self.bookmarks.remove(url) {
+            self.bookmarks.insert(url.to_string());
+        }
     }
 
     fn last_active(&self) -> i64 {
@@ -430,6 +479,27 @@ mod tests {
         assert!(!s.caught_up());
         s.progress = Some(Progress { chapter_url: "/c4".into(), chapter_name: "".into(), page: 1, pages: 2, at: 0 });
         assert!(s.caught_up());
+    }
+
+    #[test]
+    fn marks_override_what_progress_implies() {
+        let mut s = Series::new("1".into(), "S".into(), json!({ "url": "/m" }));
+        s.chapters = (0..5).rev().map(|i| json!({ "url": format!("/c{i}") })).collect();
+        s.progress = Some(Progress { chapter_url: "/c2".into(), chapter_name: "".into(), page: 0, pages: 4, at: 0 });
+        assert_eq!(s.read_flags(&s.chapters), [false, false, false, true, true]); // c4 c3 c2 c1 c0
+        assert_eq!(s.unread(), 2);
+        s.mark(&["/c4".into(), "/c3".into()], true);
+        s.mark(&["/c0".into()], false);
+        assert_eq!(s.read_flags(&s.chapters), [true, true, false, true, false]);
+        assert_eq!(s.new_flags(&s.chapters), [false, false, false, false, true]);
+        assert_eq!(s.unread(), 1);
+        assert!(!s.caught_up());
+        s.mark(&["/c2".into(), "/c0".into()], true);
+        assert!(s.caught_up());
+        s.toggle_bookmark("/c3");
+        assert!(s.bookmarks.contains("/c3"));
+        s.toggle_bookmark("/c3");
+        assert!(s.bookmarks.is_empty());
     }
 
     #[test]

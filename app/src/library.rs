@@ -248,7 +248,7 @@ impl Library {
                     None => format!("{} SERIES · {unread} UNREAD", self.library_len),
                 };
                 if self.updates_page {
-                    let fresh = self.updates.iter().filter(|(si, ci)| !self.series[*si].reading_index().is_some_and(|r| *ci >= r)).count();
+                    let fresh = self.updates.iter().filter(|(si, ci)| !self.series[*si].read_flags(&self.series[*si].chapters)[*ci]).count();
                     let note = match self.checking {
                         Some((done, total)) => format!("CHECKING {done}/{total}"),
                         None => format!("{fresh} NEW IN YOUR LIBRARY"),
@@ -544,8 +544,8 @@ impl Library {
         let chapters = self.drops[i].chapters.clone();
         let image = self.cover_of(si, cx);
         let s = &self.series[si];
-        let reading = s.reading_index();
-        let is_new = |ci: usize| !reading.is_some_and(|r| ci >= r);
+        let read = s.read_flags(&s.chapters);
+        let is_new = |ci: usize| !read[ci];
         let fresh: Vec<usize> = chapters.iter().copied().filter(|&ci| is_new(ci)).collect();
         // Start from the oldest new one, so nothing gets skipped.
         let open = fresh.iter().max().or(chapters.iter().max()).copied();
