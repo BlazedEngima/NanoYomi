@@ -398,7 +398,7 @@ impl Render for Library {
             self.zoom_seen = crate::zoom();
             self.list.remeasure();
         }
-        let width = f32::from(window.viewport_size().width);
+        let width = crate::content_width(window);
         (self.cols, self.card_w) = grid(width, PAD, GAP, CARD_W);
         let store = self.store.read(cx);
         self.series = store.library().into_iter().cloned().map(|mut s| {

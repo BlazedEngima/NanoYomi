@@ -122,7 +122,11 @@ impl Browse {
         cx.notify();
     }
 
-    fn select(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn source_id(&self) -> Option<&str> {
+        self.source.as_ref().map(|s| s.id.as_str())
+    }
+
+    pub fn select(&mut self, id: &str, cx: &mut Context<Self>) {
         self.source = self.registry.read(cx).source(id);
         self.load_filters(cx);
         let listing = if self.listing == Listing::Search && self.query.is_empty() { Listing::Popular } else { self.listing };
@@ -280,12 +284,11 @@ fn segment(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, on: b
 
 impl Render for Browse {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let width = f32::from(window.viewport_size().width);
+        let width = crate::content_width(window);
         let (cols, card_w) = grid(width, PAD, GAP, CARD_W);
         self.card_w = card_w;
         let rows = self.mangas.len().div_ceil(cols);
         let registry = self.registry.read(cx);
-        let sources = registry.browsable(self.store.read(cx));
         let selected = self.source.as_ref().map(|s| s.id.clone());
         let title = self.source.as_ref().map_or("Browse".to_string(), |s| s.name.clone());
         let note: SharedString = if !registry.ready {
@@ -373,29 +376,6 @@ impl Render for Browse {
                     )
                     .child(div().w(u(300.)).child(self.search.clone())),
             )
-            .when(sources.len() > 1, |d| {
-                d.child(
-                    div()
-                        .id("sources")
-                        // A scroll container in a column can shrink to nothing, so keep the chips' height.
-                        .flex_none()
-                        .px(u(PAD))
-                        .pt(u(16.))
-                        .pb(u(8.))
-                        .flex()
-                        .gap_2()
-                        .overflow_x_scroll()
-                        .children(sources.into_iter().map(|s| {
-                            let on = selected.as_deref() == Some(s.id.as_str());
-                            let id = s.id.clone();
-                            let label = if s.lang.is_empty() || s.lang == "all" { s.name.clone() } else { format!("{} · {}", s.name, s.lang) };
-                            segment(SharedString::from(format!("src-{}", s.id)), label, on)
-                                .border_1()
-                                .border_color(rgb(if on { TEXT } else { LINE }))
-                                .on_click(cx.listener(move |this, _, _, cx| this.select(&id, cx)))
-                        })),
-                )
-            })
             .child(
                 uniform_list(
                     "grid",

@@ -299,7 +299,7 @@ impl Render for Catalog {
         };
         self.installed = index.iter().filter(|e| registry.installed.contains(&e.pkg)).cloned().collect();
         self.available = index.iter().filter(|e| !registry.installed.contains(&e.pkg) && matches(e)).cloned().collect();
-        (self.cols, self.card_w) = grid(f32::from(window.viewport_size().width), PAD, GAP, CARD_MIN);
+        (self.cols, self.card_w) = grid(crate::content_width(window), PAD, GAP, CARD_MIN);
 
         let mut counts: HashMap<&str, usize> = HashMap::new();
         for l in index.iter().flat_map(|e| e.langs.iter()).filter(|l| *l != "all") {

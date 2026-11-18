@@ -149,6 +149,8 @@ struct Data {
     vertical_reader: bool,
     #[serde(default)]
     sync: crate::sync::Config,
+    #[serde(default)]
+    sidebar_collapsed: bool,
 }
 
 #[derive(Clone)]
@@ -281,6 +283,15 @@ impl Store {
 
     pub fn set_zoom(&mut self, z: f32, cx: &mut Context<Self>) {
         self.data.zoom = Some(z);
+        self.save_soon(cx);
+    }
+
+    pub fn sidebar_collapsed(&self) -> bool {
+        self.data.sidebar_collapsed
+    }
+
+    pub fn set_sidebar_collapsed(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.data.sidebar_collapsed = on;
         self.save_soon(cx);
     }
 

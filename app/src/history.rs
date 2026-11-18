@@ -86,7 +86,7 @@ impl Render for History {
                 s
             })
             .collect();
-        (self.cols, self.card_w) = grid(f32::from(window.viewport_size().width), PAD, GAP, CARD_W);
+        (self.cols, self.card_w) = grid(crate::content_width(window), PAD, GAP, CARD_W);
         let (count, cols) = (self.rows.len(), self.cols);
         div()
             .size_full()

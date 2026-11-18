@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
 pub struct Config {
     pub host: String,
     pub key: String,

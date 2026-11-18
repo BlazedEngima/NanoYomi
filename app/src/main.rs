@@ -16,6 +16,7 @@ mod reader;
 mod registry;
 mod rich;
 mod settings;
+mod sidebar;
 mod solver;
 mod store;
 mod sync;
@@ -73,12 +74,24 @@ pub fn u(v: f32) -> gpui::Pixels {
     px(v * zoom())
 }
 
+static SIDEBAR: AtomicU32 = AtomicU32::new(sidebar::WIDE.to_bits());
+
+fn set_sidebar_width(w: f32) {
+    SIDEBAR.store(w.to_bits(), Ordering::Relaxed);
+}
+
+/// The window's width minus the sidebar, for sizing grids.
+pub fn content_width(window: &Window) -> f32 {
+    f32::from(window.viewport_size().width) - f32::from_bits(SIDEBAR.load(Ordering::Relaxed)) * zoom()
+}
+
 struct Assets;
 
 impl gpui::AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         Ok(match path {
             "icons/search.svg" => Some(include_bytes!("../assets/icons/search.svg").as_slice().into()),
+            "icons/sidebar.svg" => Some(include_bytes!("../assets/icons/sidebar.svg").as_slice().into()),
             _ => None,
         })
     }
@@ -212,7 +225,7 @@ pub fn drop_images(cx: &mut App, mut window: Option<&mut Window>, images: Vec<Ar
     }
 }
 
-gpui::actions!(yomi, [Quit, ShowLibrary, ShowBrowse, ShowExtensions, ShowHistory, ShowSettings, ZoomIn, ZoomOut, ZoomReset]);
+gpui::actions!(yomi, [Quit, ShowLibrary, ShowBrowse, ShowExtensions, ShowHistory, ShowSettings, Search, ToggleSidebar, ZoomIn, ZoomOut, ZoomReset]);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
@@ -222,14 +235,6 @@ enum Tab {
     History,
     Settings,
 }
-
-const TABS: [(Tab, &str, &str); 5] = [
-    (Tab::Library, "書庫", "Library"),
-    (Tab::Browse, "探す", "Browse"),
-    (Tab::Extensions, "拡張", "Extensions"),
-    (Tab::History, "履歴", "History"),
-    (Tab::Settings, "設定", "Settings"),
-];
 
 struct Root {
     cache: Entity<ImageCache>,
@@ -256,6 +261,7 @@ impl Root {
         set_zoom(store.read(cx).zoom());
         page_cache::set_cap_mb(store.read(cx).page_cache_mb());
         solver::set_url(store.read(cx).solver_url());
+        set_sidebar_width(if store.read(cx).sidebar_collapsed() { sidebar::NARROW } else { sidebar::WIDE });
         let registry = cx.new(|cx| Registry::new(host, data_dir.clone(), cx));
         let library = cx.new(|cx| Library::new(store.clone(), registry.clone(), cache.clone(), cx));
         let browse = cx.new(|cx| Browse::new(registry.clone(), store.clone(), cache.clone(), cx));
@@ -374,73 +380,16 @@ impl Root {
         cx.notify();
     }
 
-    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .items_center()
-            .gap(u(32.))
-            .px(u(40.))
-            .pt(u(12.))
-            .border_b_1()
-            .border_color(rgb(BORDER))
-            .child(
-                div()
-                    .flex()
-                    .items_baseline()
-                    .gap_2()
-                    .pb(u(8.))
-                    .child(div().font_family(CJK).font_weight(FontWeight::BLACK).text_size(u(22.)).text_color(rgb(ACCENT)).child("読"))
-                    .child(div().font_family(DISPLAY).font_weight(FontWeight::BLACK).text_size(u(24.)).child("NANO")),
-            )
-            .child(div().flex().gap_1().flex_1().children(TABS.map(|(tab, jp, en)| {
-                let on = self.tab == tab;
-                div()
-                    .id(en)
-                    .flex()
-                    .flex_col()
-                    .px(u(14.))
-                    .pt(u(6.))
-                    .pb(u(8.))
-                    .border_b_2()
-                    .border_color(if on { rgb(ACCENT) } else { gpui::transparent_black().into() })
-                    .text_color(rgb(if on { TEXT } else { MUTED }))
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(rgb(TEXT)))
-                    .child(div().font_family(CJK).text_size(u(10.)).text_color(rgb(MUTED)).child(jp))
-                    .child(div().when(on, |d| d.font_weight(FontWeight::SEMIBOLD)).child(en))
-                    .on_click(cx.listener(move |this, _, window, cx| this.show(tab, window, cx)))
-            })))
-            .child(
-                div()
-                    .id("jump")
-                    .mb(u(8.))
-                    .h(u(36.))
-                    .min_w(u(260.))
-                    .px(u(14.))
-                    .rounded(u(18.))
-                    .border_1()
-                    .border_color(rgb(LINE))
-                    .bg(rgb(0x141210))
-                    .flex()
-                    .items_center()
-                    .gap(u(10.))
-                    .text_size(u(13.))
-                    .text_color(rgb(FAINT))
-                    .cursor_pointer()
-                    .child(search_icon())
-                    .child(div().flex_1().child("Search sources…"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.show(Tab::Browse, window, cx);
-                        this.browse.update(cx, |b, cx| b.search.update(cx, |s, cx| s.focus(window, cx)));
-                    })),
-            )
+    fn search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show(Tab::Browse, window, cx);
+        self.browse.update(cx, |b, cx| b.search.update(cx, |s, cx| s.focus(window, cx)));
     }
 }
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_rem_size(u(16.));
-        let root = div().size_full().flex().flex_col().bg(rgb(BG)).text_color(rgb(TEXT)).font_family(SANS).text_size(u(14.));
+        let root = div().size_full().flex().bg(rgb(BG)).text_color(rgb(TEXT)).font_family(SANS).text_size(u(14.));
         if let Some((reader, _)) = &self.reader {
             return root.child(reader.clone());
         }
@@ -459,11 +408,13 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &ShowExtensions, window, cx| this.show(Tab::Extensions, window, cx)))
             .on_action(cx.listener(|this, _: &ShowHistory, window, cx| this.show(Tab::History, window, cx)))
             .on_action(cx.listener(|this, _: &ShowSettings, window, cx| this.show(Tab::Settings, window, cx)))
+            .on_action(cx.listener(|this, _: &Search, window, cx| this.search(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(0.1, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(-0.1, cx)))
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom_by(1. - zoom(), cx)))
-            .child(self.header(cx))
-            .child(div().flex_1().min_h_0().child(screen))
+            .child(self.sidebar(cx))
+            .child(div().flex_1().min_w_0().h_full().child(screen))
     }
 }
 
@@ -509,6 +460,8 @@ fn main() {
             gpui::KeyBinding::new("cmd-4", ShowHistory, None),
             gpui::KeyBinding::new("cmd-5", ShowSettings, None),
             gpui::KeyBinding::new("cmd-,", ShowSettings, None),
+            gpui::KeyBinding::new(if cfg!(target_os = "macos") { "cmd-k" } else { "ctrl-k" }, Search, None),
+            gpui::KeyBinding::new(if cfg!(target_os = "macos") { "cmd-\\" } else { "ctrl-\\" }, ToggleSidebar, None),
             gpui::KeyBinding::new("cmd-=", ZoomIn, None),
             gpui::KeyBinding::new("cmd-+", ZoomIn, None),
             gpui::KeyBinding::new("cmd--", ZoomOut, None),
