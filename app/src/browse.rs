@@ -46,6 +46,7 @@ pub struct Browse {
     page: u32,
     has_next: bool,
     loading: bool,
+    failed: bool,
     /// Bumped on a source or listing change so stale pages get dropped.
     generation: u64,
     status: SharedString,
@@ -86,6 +87,7 @@ impl Browse {
             page: 0,
             has_next: false,
             loading: false,
+            failed: false,
             generation: 0,
             status: "".into(),
             card_w: CARD_W,
@@ -198,12 +200,14 @@ impl Browse {
         self.page = 0;
         self.has_next = false;
         self.loading = false;
+        self.failed = false;
         self.load_next_page(cx);
     }
 
     fn load_next_page(&mut self, cx: &mut Context<Self>) {
         let Some(source) = self.source.clone() else { return };
-        if self.loading || (self.page > 0 && !self.has_next) {
+        // After a failure, wait for Try again rather than asking on every frame.
+        if self.loading || self.failed || (self.page > 0 && !self.has_next) {
             return;
         }
         self.loading = true;
@@ -237,7 +241,10 @@ impl Browse {
                             cx.emit(OpenManga { source, manga });
                         }
                     }
-                    Err(e) => this.status = e.into(),
+                    Err(e) => {
+                        this.status = e.into();
+                        this.failed = true;
+                    }
                 }
                 cx.notify();
             });
@@ -295,7 +302,7 @@ impl Render for Browse {
             registry.status.clone()
         } else if self.source.is_none() {
             "no sources installed — add some in Extensions".into()
-        } else if !self.status.is_empty() {
+        } else if !self.status.is_empty() && !self.failed {
             self.status.clone()
         } else {
             format!("{} series", self.mangas.len()).into()
@@ -378,6 +385,21 @@ impl Render for Browse {
                     )
                     .child(div().w(u(300.)).max_w_full().child(self.search.clone())),
             )
+            .when(self.failed, |d| {
+                d.child(
+                    div()
+                        .px(u(PAD))
+                        .pt(u(16.))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(div().min_w_0().text_size(u(14.)).text_color(rgb(crate::ACCENT_TEXT)).child(self.status.clone()))
+                        .child(segment("retry", "Try again", false).border_1().border_color(rgb(LINE)).on_click(cx.listener(|this, _, _, cx| {
+                            this.failed = false;
+                            this.load_next_page(cx);
+                        }))),
+                )
+            })
             .child(
                 uniform_list(
                     "grid",

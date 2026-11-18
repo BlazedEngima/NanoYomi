@@ -186,6 +186,22 @@ static SOLVING: async_lock::Mutex<()> = async_lock::Mutex::new(());
 
 /// Calls the host, and on a Cloudflare check solves it (with the user's solver if one is set) and retries once.
 pub async fn call(host: &Arc<Host>, cx: &mut AsyncApp, op: &str, params: Value) -> Result<Value, String> {
+    call_raw(host, cx, op, params).await.map_err(|e| readable(&e))
+}
+
+/// Host errors arrive as Java exceptions with a stack trace. Keep the message.
+fn readable(e: &str) -> String {
+    let line = e.lines().next().unwrap_or("").trim();
+    if line.contains("HTTP error 429") {
+        return "The site is limiting requests right now. Wait a minute, then try again.".into();
+    }
+    match line.split_once(": ") {
+        Some((class, msg)) if class.ends_with("Exception") && !class.contains(' ') => msg.into(),
+        _ => line.into(),
+    }
+}
+
+async fn call_raw(host: &Arc<Host>, cx: &mut AsyncApp, op: &str, params: Value) -> Result<Value, String> {
     let mut first = host.call(op, params.clone()).await;
     // Opening a series while the Library checks it would ask twice at once, which extensions refuse. Wait instead.
     for _ in 0..60 {
@@ -236,6 +252,16 @@ pub async fn call(host: &Arc<Host>, cx: &mut AsyncApp, op: &str, params: Value) 
 }
 
 /// NANO_DEMO=<n> opens the nth popular series and pages through it (memory check).
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn errors_read_like_sentences() {
+        assert_eq!(super::readable("eu.kanade.tachiyomi.network.HttpException: HTTP error 503\n\tat x"), "HTTP error 503");
+        assert!(super::readable("eu.kanade.tachiyomi.network.HttpException: HTTP error 429").starts_with("The site is limiting"));
+        assert_eq!(super::readable("Verification was cancelled"), "Verification was cancelled");
+    }
+}
+
 pub fn demo() -> Option<usize> {
     std::env::var("NANO_DEMO").ok().map(|v| v.parse().unwrap_or(0))
 }
