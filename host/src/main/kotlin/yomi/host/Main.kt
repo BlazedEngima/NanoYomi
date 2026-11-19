@@ -71,7 +71,9 @@ fun main(args: Array<String>) {
     val host = Host()
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     runBlocking {
-        generateSequence(::readLine).forEach { line ->
+        // readLine() uses the system charset, which isn't UTF-8 on Windows before Java 18.
+        val input = System.`in`.bufferedReader(Charsets.UTF_8)
+        generateSequence(input::readLine).forEach { line ->
             if (line.isBlank()) return@forEach
             // Events from the app's web views aren't requests.
             if (line.contains("\"wvEvent\"")) {
