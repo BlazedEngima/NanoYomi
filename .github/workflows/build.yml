@@ -8,7 +8,7 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-    paths: ["app/**", "host/**", ".github/workflows/build.yml"]
+    paths: ["app/**", "host/**", "packaging/**", ".github/workflows/build.yml"]
 
 jobs:
   build:
@@ -169,7 +169,24 @@ jobs:
           flatpak build-bundle --arch=$arch --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo repo "nano-${{ matrix.name }}.flatpak" app.nano.Reader
           ls -lh nano-${{ matrix.name }}.flatpak
 
-      - uses: actions/upload-artifact@v4
+      # Each file goes up as-is (archive: false) so the .dmg, .flatpak and .tar.gz aren't wrapped in a zip.
+      - uses: actions/upload-artifact@v7
         with:
-          name: nano-${{ matrix.name }}
-          path: nano-${{ matrix.name }}.*
+          path: nano-${{ matrix.name }}.zip
+          archive: false
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        with:
+          path: nano-${{ matrix.name }}.tar.gz
+          archive: false
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        with:
+          path: nano-${{ matrix.name }}.dmg
+          archive: false
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        with:
+          path: nano-${{ matrix.name }}.flatpak
+          archive: false
+          if-no-files-found: ignore
