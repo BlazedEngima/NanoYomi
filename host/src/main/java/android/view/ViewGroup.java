@@ -46,5 +46,9 @@ public class ViewGroup extends View implements ViewParent {
         public int leftMargin, topMargin, rightMargin, bottomMargin;
         public MarginLayoutParams(int width, int height) { super(width, height); }
         public void setMargins(int l, int t, int r, int b) { leftMargin = l; topMargin = t; rightMargin = r; bottomMargin = b; }
+        public void setMarginStart(int start) { leftMargin = start; }
+        public void setMarginEnd(int end) { rightMargin = end; }
+        public int getMarginStart() { return leftMargin; }
+        public int getMarginEnd() { return rightMargin; }
     }
 }

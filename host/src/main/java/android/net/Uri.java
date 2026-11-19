@@ -57,4 +57,50 @@ public class Uri {
     @Override public String toString() { return s; }
     @Override public boolean equals(Object o) { return o instanceof Uri other && other.s.equals(s); }
     @Override public int hashCode() { return s.hashCode(); }
+    public Builder buildUpon() { return new Builder(s); }
+
+    /** Builds on the string form, appending encoded path segments and query parameters. */
+    public static final class Builder {
+        private String scheme, authority, path = "", query, fragment;
+        public Builder() {}
+        Builder(String uri) {
+            Uri u = Uri.parse(uri);
+            if (u.u == null) { path = uri; return; }
+            scheme = u.u.getScheme();
+            authority = u.u.getRawAuthority();
+            path = u.u.getRawPath() == null ? "" : u.u.getRawPath();
+            query = u.u.getRawQuery();
+            fragment = u.u.getRawFragment();
+        }
+        public Builder scheme(String s) { scheme = s; return this; }
+        public Builder authority(String a) { authority = a; return this; }
+        public Builder encodedAuthority(String a) { authority = a; return this; }
+        public Builder path(String p) { path = p == null ? "" : p.replace(" ", "%20"); return this; }
+        public Builder encodedPath(String p) { path = p == null ? "" : p; return this; }
+        public Builder appendPath(String segment) { return appendEncodedPath(encode(segment)); }
+        public Builder appendEncodedPath(String segment) {
+            path = (path.endsWith("/") ? path : path + "/") + (segment.startsWith("/") ? segment.substring(1) : segment);
+            return this;
+        }
+        public Builder appendQueryParameter(String key, String value) {
+            String pair = encode(key) + "=" + encode(value == null ? "" : value);
+            query = query == null || query.isEmpty() ? pair : query + "&" + pair;
+            return this;
+        }
+        public Builder encodedQuery(String q) { query = q; return this; }
+        public Builder query(String q) { query = q; return this; }
+        public Builder clearQuery() { query = null; return this; }
+        public Builder fragment(String f) { fragment = f; return this; }
+        public Uri build() {
+            StringBuilder b = new StringBuilder();
+            if (scheme != null) b.append(scheme).append(':');
+            if (authority != null) b.append("//").append(authority);
+            if (authority != null && !path.isEmpty() && !path.startsWith("/")) b.append('/');
+            b.append(path);
+            if (query != null) b.append('?').append(query);
+            if (fragment != null) b.append('#').append(fragment);
+            return Uri.parse(b.toString());
+        }
+        @Override public String toString() { return build().toString(); }
+    }
 }

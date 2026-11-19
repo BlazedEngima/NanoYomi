@@ -31,9 +31,29 @@ public class Context {
     public static final String DISPLAY_SERVICE = "display";
 
     public Object getSystemService(String name) {
+        if (ACTIVITY_SERVICE.equals(name)) return new android.app.ActivityManager();
         return DISPLAY_SERVICE.equals(name) ? new android.hardware.display.DisplayManager() : null;
     }
 
+    public File getCodeCacheDir() { return mk(new File(dataDir, "code_cache")); }
+    public File getExternalCacheDir() { return getCacheDir(); }
+    public File getExternalFilesDir(String type) { return getFilesDir(); }
+    public File getDir(String name, int mode) { return mk(new File(dataDir, "app_" + safe(name))); }
+    public File getDataDir() { return dataDir; }
+    public ClassLoader getClassLoader() { return Context.class.getClassLoader(); }
+    public android.content.pm.ApplicationInfo getApplicationInfo() {
+        var info = new android.content.pm.ApplicationInfo();
+        info.dataDir = dataDir.getPath();
+        info.packageName = getPackageName();
+        return info;
+    }
+    public static final String ACTIVITY_SERVICE = "activity";
+    @SuppressWarnings("unchecked")
+    public <T> T getSystemService(Class<T> type) {
+        if (type == android.app.ActivityManager.class) return (T) new android.app.ActivityManager();
+        if (type == android.hardware.display.DisplayManager.class) return (T) new android.hardware.display.DisplayManager();
+        return null;
+    }
     private static File mk(File f) { f.mkdirs(); return f; }
 
     private static String safe(String n) { return n.replaceAll("[^A-Za-z0-9._-]", "_"); }

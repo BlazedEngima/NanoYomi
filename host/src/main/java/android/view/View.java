@@ -64,6 +64,29 @@ public class View {
     public boolean post(Runnable action) { return false; }
     public boolean postDelayed(Runnable action, long delayMillis) { return false; }
     public void invalidate() {}
+    private int paddingLeft, paddingTop, paddingRight, paddingBottom;
+    private CharSequence contentDescription;
+    private OnClickListener onClick;
+    public void setPadding(int l, int t, int r, int b) { paddingLeft = l; paddingTop = t; paddingRight = r; paddingBottom = b; }
+    public void setPaddingRelative(int start, int t, int end, int b) { setPadding(start, t, end, b); }
+    public int getPaddingLeft() { return paddingLeft; }
+    public int getPaddingTop() { return paddingTop; }
+    public int getPaddingRight() { return paddingRight; }
+    public int getPaddingBottom() { return paddingBottom; }
+    public int getPaddingStart() { return paddingLeft; }
+    public int getPaddingEnd() { return paddingRight; }
+    public void setContentDescription(CharSequence d) { contentDescription = d; }
+    public CharSequence getContentDescription() { return contentDescription; }
+    public void setImportantForAccessibility(int mode) {}
+    public void setHorizontalScrollBarEnabled(boolean enabled) {}
+    public void setVerticalScrollBarEnabled(boolean enabled) {}
+    public void setId(int id) {}
+    public void setMinimumHeight(int h) {}
+    public void setMinimumWidth(int w) {}
+    public void setOnClickListener(OnClickListener l) { onClick = l; }
+    /** Nothing is tapped on desktop, but code may click a view itself. */
+    public boolean performClick() { if (onClick == null) return false; onClick.onClick(this); return true; }
+    public interface OnClickListener { void onClick(View v); }
     public void requestLayout() {}
 
     public static class MeasureSpec {

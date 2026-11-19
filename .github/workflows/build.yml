@@ -88,10 +88,10 @@ jobs:
       - name: Build extension host
         working-directory: host
         shell: bash
-        run: ./gradlew installDist
+        run: ./gradlew test installDist
 
-      # The modules past jdeps' list are ones extensions reach at run time: EC for TLS, extra charsets,
-      # java.sql dates and locale data for date parsing.
+      # The modules past jdeps' list are ones extensions reach at run time: java.desktop for Bitmap and Canvas,
+      # EC for TLS, extra charsets, java.sql dates and locale data for date parsing.
       - name: Bundle
         shell: bash
         run: |
@@ -104,7 +104,7 @@ jobs:
           cp "app/target/${{ matrix.target }}/release/nano-reader$exe" dist/nano/
           cp -R host/build/install/yomi-host dist/nano/host
           "$JAVA_HOME/bin/jlink" --module-path "$target_jdk/jmods" \
-            --add-modules java.base,java.instrument,java.logging,java.xml,jdk.unsupported,jdk.crypto.ec,jdk.charsets,java.sql,jdk.localedata \
+            --add-modules java.base,java.desktop,java.instrument,java.logging,java.xml,jdk.unsupported,jdk.crypto.ec,jdk.charsets,java.sql,jdk.localedata \
             --include-locales=en,ja,ko,zh,es,pt,fr,de,it,ru,id,vi,th,tr,ar,pl,uk \
             --strip-debug --no-man-pages --no-header-files --compress=2 --output dist/nano/host/jre
           test -f "dist/nano/host/jre/bin/java$exe"
