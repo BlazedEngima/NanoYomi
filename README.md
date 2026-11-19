@@ -1,10 +1,12 @@
-| Platforms | Built with | Extensions |
-|-------|----------|----------|
-| ![macOS · Windows · Linux](https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux-desktop-e85a3c) | [![Rust + GPUI](https://img.shields.io/badge/Rust-GPUI-e85a3c)](https://www.gpui.rs) | ![Mihon extensions](https://img.shields.io/badge/Mihon-extensions-e85a3c) |
+<p align="center"><img src="./.github/readme-images/logo.png" alt="Nano" width="128"></p>
 
-<img src="./.github/readme-images/logo.png" alt="Nano" width="96" align="left">
+<h1 align="center">Nano</h1>
 
-# Nano
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux-desktop-e85a3c" alt="macOS · Windows · Linux">
+  <a href="https://www.gpui.rs"><img src="https://img.shields.io/badge/Rust-GPUI-e85a3c" alt="Rust + GPUI"></a>
+  <img src="https://img.shields.io/badge/Mihon-extensions-e85a3c" alt="Mihon extensions">
+</p>
 
 Nano is a free and open source manga reader for the desktop. It runs the same extensions as [Mihon](https://github.com/mihonapp/mihon) and Tachiyomi, so the sources you use on your phone work on your computer too. The app is native (Rust and [GPUI](https://www.gpui.rs), the UI framework behind Zed), and extensions run in a small JVM host beside it.
 
