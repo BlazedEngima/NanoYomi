@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Nano
+Comment=Manga reader with Mihon extensions
+Exec=nano-reader
+Icon=app.nano.Reader
+Categories=Graphics;Viewer;

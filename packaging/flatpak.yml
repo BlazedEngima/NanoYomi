@@ -1,0 +1,25 @@
+app-id: app.nano.Reader
+runtime: org.gnome.Platform
+runtime-version: "49"
+sdk: org.gnome.Sdk
+command: nano-reader
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --socket=pulseaudio
+  - --filesystem=home
+modules:
+  - name: nano
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/bin /app/nano
+      - cp -a nano/. /app/nano/
+      - ln -s /app/nano/nano-reader /app/bin/nano-reader
+      - install -Dm644 packaging/nano.svg /app/share/icons/hicolor/scalable/apps/app.nano.Reader.svg
+      - install -Dm644 packaging/app.nano.Reader.desktop /app/share/applications/app.nano.Reader.desktop
+    sources:
+      - type: dir
+        path: stage

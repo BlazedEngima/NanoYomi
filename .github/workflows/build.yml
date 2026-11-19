@@ -113,6 +113,62 @@ jobs:
           cd dist
           if [ -n "$exe" ]; then 7z a -bso0 "../nano-${{ matrix.name }}.zip" nano; else tar -czf "../nano-${{ matrix.name }}.tar.gz" nano; fi
 
+      # A .app wraps the binary, host and runtime, and a .dmg holds the app. It isn't signed, so Gatekeeper asks on first launch.
+      - name: macOS app and dmg
+        if: runner.os == 'macOS'
+        run: |
+          version=$(grep -m1 '^version' app/Cargo.toml | cut -d'"' -f2)
+          c=dist/Nano.app/Contents
+          mkdir -p "$c/MacOS" "$c/Resources" dist/Nano.iconset
+          cp -R dist/nano/. "$c/MacOS/"
+          for s in 16 32 128 256 512; do
+            sips -z $s $s packaging/nano.png --out dist/Nano.iconset/icon_${s}x${s}.png >/dev/null
+            sips -z $((s*2)) $((s*2)) packaging/nano.png --out dist/Nano.iconset/icon_${s}x${s}@2x.png >/dev/null
+          done
+          iconutil -c icns dist/Nano.iconset -o "$c/Resources/Nano.icns"
+          cat > "$c/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>Nano</string>
+            <key>CFBundleDisplayName</key><string>Nano</string>
+            <key>CFBundleIdentifier</key><string>app.nano.Reader</string>
+            <key>CFBundleExecutable</key><string>nano-reader</string>
+            <key>CFBundleIconFile</key><string>Nano</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>$version</string>
+            <key>CFBundleVersion</key><string>$version</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          EOF
+          mkdir dist/dmg && cp -R dist/Nano.app dist/dmg/ && ln -s /Applications dist/dmg/Applications
+          hdiutil create -volname Nano -srcfolder dist/dmg -ov -format UDZO "nano-${{ matrix.name }}.dmg"
+
+      # The GNOME runtime carries WebKitGTK and the graphics libraries, so the bundle runs on any distro with Flatpak.
+      # ARM64 runs under QEMU, which is slow but only copies files.
+      - uses: docker/setup-qemu-action@v3
+        if: runner.os == 'Linux' && matrix.jdk == 'aarch64'
+
+      - name: Flatpak
+        if: runner.os == 'Linux'
+        run: |
+          arch=x86_64; [ "${{ matrix.jdk }}" = aarch64 ] && arch=aarch64
+          sudo apt-get install -y flatpak flatpak-builder
+          # Ubuntu 24.04 blocks the user namespaces bubblewrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive --arch=$arch flathub org.gnome.Platform//49 org.gnome.Sdk//49
+          mkdir stage && cp -a dist/nano stage/ && cp -a packaging stage/
+          flatpak-builder --user --arch=$arch --force-clean --disable-rofiles-fuse --repo=repo build packaging/flatpak.yml
+          # Every library the binary needs must resolve inside the runtime, or it won't start for users.
+          if [ "$arch" = x86_64 ]; then
+            missing=$(flatpak build build ldd /app/nano/nano-reader 2>&1 | grep -E 'not found|version' || true)
+            [ -z "$missing" ] || { echo "$missing"; exit 1; }
+          fi
+          flatpak build-bundle --arch=$arch --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo repo "nano-${{ matrix.name }}.flatpak" app.nano.Reader
+          ls -lh nano-${{ matrix.name }}.flatpak
+
       - uses: actions/upload-artifact@v4
         with:
           name: nano-${{ matrix.name }}
