@@ -24,6 +24,11 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 jxl-oxide = { version = "0.12", features = ["image"] }
 sysinfo = { version = "0.31", default-features = false, features = ["system"] }
 
+# The WebView2 calls wry doesn't wrap. Same versions wry uses.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Com"] }
+
 # The WebKit calls wry doesn't wrap, for extensions' hidden WebViews.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

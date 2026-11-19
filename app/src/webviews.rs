@@ -328,7 +328,10 @@ impl WebViewHost {
     fn build(&self, view: i64, width: f64, height: f64, window: &mut Window) -> wry::Result<wry::WebView> {
         let ipc_host = self.host.clone();
         let load_host = self.host.clone();
-        let wv = wry::WebViewBuilder::new()
+        let builder = wry::WebViewBuilder::new();
+        #[cfg(windows)]
+        let builder = wry::WebViewBuilderExtWindows::with_additional_browser_args(builder, native::BROWSER_ARGS);
+        let wv = builder
             .with_bounds(rect(width, height))
             .with_initialization_script_for_main_only(BOOTSTRAP, false)
             .with_ipc_handler(move |req| {
@@ -360,7 +363,7 @@ impl WebViewHost {
     }
 }
 
-/// WebKit calls wry doesn't wrap. Windows and Linux get stand-ins for now, so pages that need them don't work there yet.
+/// WebKit calls wry doesn't wrap. Linux gets stand-ins for now, so pages that need them don't work there yet.
 #[cfg(target_os = "macos")]
 pub(crate) mod native {
     use objc2::MainThreadOnly;
@@ -464,11 +467,127 @@ pub(crate) mod native {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// The WebView2 calls wry doesn't wrap.
+#[cfg(windows)]
+pub(crate) mod native {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use webview2_com::Microsoft::Web::WebView2::Win32::*;
+    use webview2_com::{CallDevToolsProtocolMethodCompletedHandler, WebResourceRequestedEventHandler};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::SHCreateMemStream;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::core::{HSTRING, Interface, w};
+    use wry::{WebView, WebViewExtWindows};
+
+    /// Chromium otherwise slows or pauses pages in a hidden or covered window.
+    pub const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion \
+        --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding";
+
+    pub fn set_user_agent(wv: &WebView, ua: &str) {
+        unsafe {
+            if let Ok(settings) = wv.webview().Settings().and_then(|s| s.cast::<ICoreWebView2Settings2>()) {
+                let _ = settings.SetUserAgent(&HSTRING::from(ua));
+            }
+        }
+    }
+
+    /// Navigates to `base` and answers that one request with `html`, so the page gets the site's origin, as on Android.
+    pub fn load_html(wv: &WebView, html: &str, base: &str) {
+        if !base.starts_with("http") {
+            let _ = wv.load_html(html);
+            return;
+        }
+        let (webview, env) = (wv.webview(), wv.environment());
+        let body = html.as_bytes().to_vec();
+        let served = Arc::new(AtomicBool::new(false));
+        // ponytail: each call leaves a spent handler behind; remove them by token if views ever load many documents.
+        let handler = WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
+            let Some(args) = args else { return Ok(()) };
+            if served.swap(true, Ordering::SeqCst) {
+                return Ok(());
+            }
+            unsafe {
+                let stream = SHCreateMemStream(Some(&body));
+                let response = env.CreateWebResourceResponse(stream.as_ref(), 200, w!("OK"), w!("Content-Type: text/html; charset=utf-8"))?;
+                args.SetResponse(&response)?;
+            }
+            Ok(())
+        }));
+        unsafe {
+            let mut token = Default::default();
+            let filter = HSTRING::from(format!("{}*", base.trim_end_matches('/')));
+            let ok = webview.AddWebResourceRequestedFilter(&filter, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT).is_ok()
+                && webview.add_WebResourceRequested(&handler, &mut token).is_ok();
+            if !ok || webview.Navigate(&HSTRING::from(base)).is_err() {
+                let _ = wv.load_html(html);
+            }
+        }
+    }
+
+    pub fn stop(wv: &WebView) {
+        let _ = unsafe { wv.webview().Stop() };
+    }
+
+    fn root(wv: &WebView) -> HWND {
+        unsafe { GetAncestor(wv.hwnd(), GA_ROOT) }
+    }
+
+    /// Shown but far off screen and out of the taskbar, so pages still draw and lazy-load.
+    pub fn hide_window(wv: &WebView) {
+        let hwnd = root(wv);
+        unsafe {
+            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW.0 as isize | WS_EX_NOACTIVATE.0 as isize);
+            let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), -32000, -32000, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+    }
+
+    /// Back in the taskbar, centred on the main screen.
+    pub fn show_window(wv: &WebView) {
+        let hwnd = root(wv);
+        unsafe {
+            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style & !(WS_EX_TOOLWINDOW.0 as isize | WS_EX_NOACTIVATE.0 as isize));
+            let mut r = Default::default();
+            let _ = GetWindowRect(hwnd, &mut r);
+            let (w, h) = (r.right - r.left, r.bottom - r.top);
+            let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+            let _ = SetWindowPos(hwnd, Some(HWND_TOP), (sw - w) / 2, (sh - h) / 2, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
+
+    pub fn keep_running_hidden(wv: &WebView) {
+        let _ = unsafe { wv.controller().SetIsVisible(true) };
+    }
+
+    /// Runs `js` at document start in every frame of every later page.
+    pub fn add_script(wv: &WebView, js: &str) {
+        let handler = webview2_com::AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|_, _| Ok(())));
+        let _ = unsafe { wv.webview().AddScriptToExecuteOnDocumentCreated(&HSTRING::from(js), &handler) };
+    }
+
+    /// action is 0 down, 1 up, 2 move. (x, y) are CSS pixels from the top-left.
+    /// Sent through DevTools, so the page sees trusted mouse events.
+    pub fn touch(wv: &WebView, action: i64, x: f64, y: f64) {
+        let (kind, buttons) = match action {
+            0 => ("mousePressed", 1),
+            1 => ("mouseReleased", 0),
+            2 => ("mouseMoved", 1),
+            _ => return,
+        };
+        let params = serde_json::json!({ "type": kind, "x": x, "y": y, "button": "left", "buttons": buttons, "clickCount": 1 }).to_string();
+        let done = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+        let _ = unsafe { wv.webview().CallDevToolsProtocolMethod(w!("Input.dispatchMouseEvent"), &HSTRING::from(params), &done) };
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub(crate) mod native {
     use wry::WebView;
 
-    // wry can't change the user agent after creation. Windows and Linux need per-platform calls.
+    // wry can't change the user agent after creation. Linux needs its own call.
     pub fn set_user_agent(_: &WebView, _: &str) {}
 
     /// Without a base URL the page's origin differs, which is fine for simple pages.
