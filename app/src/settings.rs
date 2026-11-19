@@ -204,9 +204,9 @@ impl Render for Settings {
             .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(
                 "Shelves for your library, shown as tabs above it. Put a series in one from its page. They sync with your phone through SyncYomi.",
             ));
-        let auto = self.store.read(cx).auto_download();
+        let auto = self.store.read(cx).prefs().auto_download;
         let auto_chip = |id: &'static str, label: &'static str, value: bool, store: Entity<Store>| {
-            small_button(id, label, auto == value).on_click(move |_, _, cx| store.update(cx, |s, cx| s.set_auto_download(value, cx)))
+            small_button(id, label, auto == value).on_click(move |_, _, cx| store.update(cx, |s, cx| s.edit_prefs(cx, |p| p.auto_download = value)))
         };
         let folder = crate::downloads::dir().map(|d| d.display().to_string()).unwrap_or_default();
         let downloads = div()
@@ -231,9 +231,9 @@ impl Render for Settings {
                     ))),
             )
             .child(div().flex_none().flex().gap(u(6.)).child(auto_chip("auto-off", "Off", false, self.store.clone())).child(auto_chip("auto-on", "On", true, self.store.clone())));
-        let vertical = self.store.read(cx).vertical_reader();
+        let vertical = self.store.read(cx).prefs().vertical_reader;
         let mode_chip = |id: &'static str, label: &'static str, value: bool, store: Entity<Store>| {
-            small_button(id, label, vertical == value).on_click(move |_, _, cx| store.update(cx, |s, cx| s.set_vertical_reader(value, cx)))
+            small_button(id, label, vertical == value).on_click(move |_, _, cx| store.update(cx, |s, cx| s.edit_prefs(cx, |p| p.vertical_reader = value)))
         };
         let reading = div()
             .w_full()
@@ -257,14 +257,14 @@ impl Render for Settings {
                     )),
             )
             .child(div().flex_none().flex().gap(u(6.)).child(mode_chip("mode-paged", "Paged", false, self.store.clone())).child(mode_chip("mode-vertical", "Vertical", true, self.store.clone())));
-        let chosen = self.store.read(cx).host_heap_mb();
+        let chosen = self.store.read(cx).prefs().host_heap_mb;
         let auto = crate::host::auto_heap_mb();
         let effective = chosen.unwrap_or(auto);
         let restart = crate::host::LAUNCH_HEAP_MB.get().is_some_and(|m| *m != effective);
         let store = self.store.clone();
         let heap_choice = move |id: (&'static str, usize), label: String, value: Option<u32>| {
             let store = store.clone();
-            small_button(id, "", chosen == value).child(label).on_click(move |_, _, cx| store.update(cx, |s, cx| s.set_host_heap_mb(value, cx)))
+            small_button(id, "", chosen == value).child(label).on_click(move |_, _, cx| store.update(cx, |s, cx| s.edit_prefs(cx, |p| p.host_heap_mb = value)))
         };
         let heap_chips: Vec<_> = std::iter::once(heap_choice(("heap", 0), format!("Auto · {auto} MB"), None))
             .chain(crate::host::HEAP_CHOICES_MB.map(|mb| heap_choice(("heap", mb as usize), format!("{mb} MB"), Some(mb))))

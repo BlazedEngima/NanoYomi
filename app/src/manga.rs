@@ -103,7 +103,7 @@ impl MangaView {
                         }
                         this.status = "".into();
                         this.save(cx, |_| {});
-                        if crate::demo().is_some() && !this.chapters.is_empty() && !std::env::var("NANO_DEMO_MODE").unwrap_or_default().starts_with("series") {
+                        if crate::demo().is_some() && !this.chapters.is_empty() && !crate::demo_mode().starts_with("series") {
                             cx.emit(MangaEvent::Read { chapters: this.chapters.clone(), index: this.chapters.len() - 1, page: 0 });
                         }
                     }
@@ -131,7 +131,7 @@ impl MangaView {
             hidden: saved.as_ref().map(|s| s.hidden()).unwrap_or_default(),
             chosen: saved.as_ref().is_some_and(|s| s.scanlators_chosen),
             // NANO_DEMO_MODE=series-menu opens with the scanlator menu shown (for testing).
-            menu: std::env::var("NANO_DEMO_MODE").as_deref() == Ok("series-menu"),
+            menu: crate::demo_mode() == "series-menu",
             menu_closed: None,
             visible: Arc::default(),
             rows: vec![],

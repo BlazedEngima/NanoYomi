@@ -101,17 +101,18 @@ pub const SLIDE: std::time::Duration = std::time::Duration::from_millis(240);
 
 struct Assets;
 
+const ICONS: [(&str, &[u8]); 6] = [
+    ("icons/search.svg", include_bytes!("../assets/icons/search.svg")),
+    ("icons/chevron.svg", include_bytes!("../assets/icons/chevron.svg")),
+    ("icons/bookmark.svg", include_bytes!("../assets/icons/bookmark.svg")),
+    ("icons/downloaded.svg", include_bytes!("../assets/icons/downloaded.svg")),
+    ("icons/check.svg", include_bytes!("../assets/icons/check.svg")),
+    ("icons/sidebar.svg", include_bytes!("../assets/icons/sidebar.svg")),
+];
+
 impl gpui::AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        Ok(match path {
-            "icons/search.svg" => Some(include_bytes!("../assets/icons/search.svg").as_slice().into()),
-            "icons/chevron.svg" => Some(include_bytes!("../assets/icons/chevron.svg").as_slice().into()),
-            "icons/bookmark.svg" => Some(include_bytes!("../assets/icons/bookmark.svg").as_slice().into()),
-            "icons/downloaded.svg" => Some(include_bytes!("../assets/icons/downloaded.svg").as_slice().into()),
-            "icons/check.svg" => Some(include_bytes!("../assets/icons/check.svg").as_slice().into()),
-            "icons/sidebar.svg" => Some(include_bytes!("../assets/icons/sidebar.svg").as_slice().into()),
-            _ => None,
-        })
+        Ok(ICONS.iter().find(|(p, _)| *p == path).map(|(_, b)| (*b).into()))
     }
     fn list(&self, _: &str) -> gpui::Result<Vec<SharedString>> {
         Ok(vec![])
@@ -280,6 +281,11 @@ pub fn demo() -> Option<usize> {
     std::env::var("NANO_DEMO").ok().map(|v| v.parse().unwrap_or(0))
 }
 
+/// NANO_DEMO_MODE picks a screen state for testing, empty when unset.
+pub fn demo_mode() -> String {
+    std::env::var("NANO_DEMO_MODE").unwrap_or_default()
+}
+
 /// Frees the GPU copies. Pass the window if you're inside one, since GPUI can't reach it while it's borrowed.
 pub fn drop_images(cx: &mut App, mut window: Option<&mut Window>, images: Vec<Arc<RenderImage>>) {
     for image in images {
@@ -333,7 +339,7 @@ impl Root {
         set_zoom(store.read(cx).zoom());
         page_cache::set_cap_mb(store.read(cx).page_cache_mb());
         solver::set_url(store.read(cx).solver_url());
-        set_sidebar_width(if store.read(cx).sidebar_collapsed() { sidebar::NARROW } else { sidebar::WIDE });
+        set_sidebar_width(if store.read(cx).prefs().sidebar_collapsed { sidebar::NARROW } else { sidebar::WIDE });
         let registry = cx.new(|cx| Registry::new(host, data_dir.clone(), cx));
         let library = cx.new(|cx| Library::new(store.clone(), registry.clone(), cache.clone(), cx));
         let browse = cx.new(|cx| Browse::new(registry.clone(), store.clone(), cache.clone(), cx));
@@ -571,7 +577,7 @@ fn main() {
     downloads::set_dir(data_dir.join("downloads"));
     // Kagane serves JPEG XL, which `image` only decodes through this hook.
     jxl_oxide::integration::register_image_decoding_hook();
-    let heap_mb = Store::load(data_dir.join("library.json")).host_heap_mb().unwrap_or_else(host::auto_heap_mb);
+    let heap_mb = Store::load(data_dir.join("library.json")).prefs().host_heap_mb.unwrap_or_else(host::auto_heap_mb);
     let _ = host::LAUNCH_HEAP_MB.set(heap_mb);
     let host = Host::spawn(&host::host_bin(), &data_dir.join("host"), heap_mb)
         .unwrap_or_else(|e| panic!("start extension host {}: {e}", host::host_bin().display()));

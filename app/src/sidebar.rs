@@ -53,14 +53,14 @@ fn label(text: &'static str) -> impl IntoElement {
 
 impl Root {
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        let on = !self.store.read(cx).sidebar_collapsed();
-        self.store.update(cx, |s, cx| s.set_sidebar_collapsed(on, cx));
+        let on = !self.store.read(cx).prefs().sidebar_collapsed;
+        self.store.update(cx, |s, cx| s.edit_prefs(cx, |p| p.sidebar_collapsed = on));
         self.sidebar_moves += 1;
         cx.notify();
     }
 
     pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let narrow = self.store.read(cx).sidebar_collapsed();
+        let narrow = self.store.read(cx).prefs().sidebar_collapsed;
         let in_screen = self.migrate.is_none();
         let nav = |tab: Tab, jp: &'static str, en: &'static str, cx: &mut Context<Self>| {
             let on = in_screen && self.tab == tab;

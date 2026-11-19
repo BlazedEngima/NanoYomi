@@ -229,6 +229,20 @@ pub fn visible_chapters(chapters: &[Value], hidden: &[String]) -> Vec<Value> {
     chapters.iter().filter(|c| !hidden.iter().any(|h| h == scanlator(c))).cloned().collect()
 }
 
+/// Plain settings with no side effects, changed through `edit_prefs`.
+#[derive(Serialize, Deserialize, Default)]
+pub struct Prefs {
+    /// Unset means sized for this machine.
+    #[serde(default)]
+    pub host_heap_mb: Option<u32>,
+    #[serde(default)]
+    pub vertical_reader: bool,
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
+    #[serde(default)]
+    pub auto_download: bool,
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct Data {
     series: Vec<Series>,
@@ -240,19 +254,12 @@ struct Data {
     solver_url: String,
     #[serde(default)]
     page_cache_mb: Option<u32>,
-    /// Unset means sized for this machine.
-    #[serde(default)]
-    host_heap_mb: Option<u32>,
-    #[serde(default)]
-    vertical_reader: bool,
+    #[serde(flatten)]
+    prefs: Prefs,
     #[serde(default)]
     sync: crate::sync::Config,
     #[serde(default)]
-    sidebar_collapsed: bool,
-    #[serde(default)]
     repos: Vec<crate::extensions::Repo>,
-    #[serde(default)]
-    auto_download: bool,
     #[serde(default)]
     categories: Vec<Category>,
     /// Categories were added, renamed or removed here since the last sync.
@@ -566,23 +573,14 @@ impl Store {
         });
     }
 
-    pub fn auto_download(&self) -> bool {
-        self.data.auto_download
+    pub fn prefs(&self) -> &Prefs {
+        &self.data.prefs
     }
 
-    pub fn set_auto_download(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.data.auto_download = on;
+    pub fn edit_prefs(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Prefs)) {
+        f(&mut self.data.prefs);
         self.save_soon(cx);
         cx.notify();
-    }
-
-    pub fn sidebar_collapsed(&self) -> bool {
-        self.data.sidebar_collapsed
-    }
-
-    pub fn set_sidebar_collapsed(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.data.sidebar_collapsed = on;
-        self.save_soon(cx);
     }
 
     pub fn solver_url(&self) -> &str {
@@ -595,28 +593,6 @@ impl Store {
             crate::solver::set_url(url);
             self.save_soon(cx);
         }
-    }
-
-    pub fn vertical_reader(&self) -> bool {
-        self.data.vertical_reader
-    }
-
-    pub fn set_vertical_reader(&mut self, on: bool, cx: &mut Context<Self>) {
-        if self.data.vertical_reader != on {
-            self.data.vertical_reader = on;
-            self.save_soon(cx);
-            cx.notify();
-        }
-    }
-
-    pub fn host_heap_mb(&self) -> Option<u32> {
-        self.data.host_heap_mb
-    }
-
-    pub fn set_host_heap_mb(&mut self, mb: Option<u32>, cx: &mut Context<Self>) {
-        self.data.host_heap_mb = mb;
-        self.save_soon(cx);
-        cx.notify();
     }
 
     pub fn page_cache_mb(&self) -> u32 {
@@ -753,4 +729,13 @@ mod tests {
         assert_eq!(default_hidden(&chapters, Some("/1")), vec!["B".to_string(), "Unknown".to_string()]);
         assert!(default_hidden(&[], None).is_empty());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn prefs_read_from_old_files() {
+    let d: Data = serde_json::from_str(r#"{"series":[],"vertical_reader":true,"host_heap_mb":128}"#).unwrap();
+    assert!(d.prefs.vertical_reader && !d.prefs.auto_download);
+    assert_eq!(d.prefs.host_heap_mb, Some(128));
+    assert!(serde_json::to_string(&d).unwrap().contains(r#""vertical_reader":true"#));
 }

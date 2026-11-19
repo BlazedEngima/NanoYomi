@@ -207,7 +207,7 @@ impl Library {
                         if store.get(&source.id, manga["url"].as_str().unwrap_or_default()).is_none() {
                             return vec![];
                         }
-                        let auto = store.auto_download();
+                        let auto = store.prefs().auto_download;
                         store.update(&source.id, &source.name, &manga, cx, |s| {
                             let known: std::collections::HashSet<String> = s.chapters.iter().filter_map(|c| c["url"].as_str().map(str::to_string)).collect();
                             // Only when the list was known before, or a first check would download everything.

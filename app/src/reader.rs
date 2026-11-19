@@ -87,7 +87,7 @@ impl Reader {
     ) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        let vertical = std::env::var("NANO_DEMO_MODE").as_deref() == Ok("vertical") || store.read(cx).vertical_reader();
+        let vertical = crate::demo_mode() == "vertical" || store.read(cx).prefs().vertical_reader;
         let mode = if vertical { Mode::Vertical } else { Mode::Paged };
         let mut this = Reader {
             source,
@@ -256,7 +256,7 @@ impl Reader {
         self.release_all(Some(window), cx);
         self.mode = if self.mode == Mode::Paged { Mode::Vertical } else { Mode::Paged };
         let vertical = self.mode == Mode::Vertical;
-        self.store.update(cx, |s, cx| s.set_vertical_reader(vertical, cx));
+        self.store.update(cx, |s, cx| s.edit_prefs(cx, |p| p.vertical_reader = vertical));
         self.inflight.clear();
         self.generation += 1;
         if !self.pages.is_empty() {
