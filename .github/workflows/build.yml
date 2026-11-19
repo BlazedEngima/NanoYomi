@@ -1,0 +1,119 @@
+# Nano for every desktop platform and architecture, each with the extension host and a trimmed Java runtime.
+# Hosted ARM runners are public-repo only, so ARM builds are cross-compiled on x64 (Windows, Linux) or Intel
+# builds on the ARM Mac.
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths: ["app/**", "host/**", ".github/workflows/build.yml"]
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, os: windows-latest, target: x86_64-pc-windows-msvc, jdk: x64 }
+          - { name: windows-arm64, os: windows-latest, target: aarch64-pc-windows-msvc, jdk: aarch64 }
+          - { name: macos-arm64, os: macos-latest, target: aarch64-apple-darwin, jdk: aarch64 }
+          - { name: macos-x64, os: macos-latest, target: x86_64-apple-darwin, jdk: x64 }
+          - { name: linux-x64, os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, jdk: x64 }
+          - { name: linux-arm64, os: ubuntu-24.04, target: aarch64-unknown-linux-gnu, jdk: aarch64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup target add ${{ matrix.target }}
+
+      # GPUI needs Wayland, X11, xkbcommon and fontconfig; wry needs WebKitGTK. ARM64 takes the arm64 packages
+      # beside the native ones (Ubuntu multiarch) and a cross linker.
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          suffix=""
+          extra=""
+          if [ "${{ matrix.target }}" = aarch64-unknown-linux-gnu ]; then
+            sudo dpkg --add-architecture arm64
+            sudo sed -i 's/^Types: deb$/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources
+            printf 'Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports\nSuites: noble noble-updates noble-security\nComponents: main universe\nArchitectures: arm64\n' \
+              | sudo tee /etc/apt/sources.list.d/arm64.sources
+            suffix=":arm64"
+            extra="gcc-aarch64-linux-gnu g++-aarch64-linux-gnu"
+            {
+              echo "PKG_CONFIG_ALLOW_CROSS=1"
+              echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+              echo "PKG_CONFIG_SYSROOT_DIR=/"
+              echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"
+              echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc"
+              echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++"
+            } >> "$GITHUB_ENV"
+          fi
+          sudo apt-get update
+          pkgs="libwebkit2gtk-4.1-dev libgtk-3-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libasound2-dev"
+          sudo apt-get install -y $extra $(for p in $pkgs; do printf '%s%s ' "$p" "$suffix"; done)
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/target
+          key: ${{ matrix.name }}-${{ hashFiles('app/Cargo.lock') }}
+          restore-keys: ${{ matrix.name }}-
+
+      # ring builds its C with clang for Windows ARM64, which the runner image ships.
+      - name: Build app
+        working-directory: app
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # The target's JDK is only a source of jmods for jlink, so it needn't run here.
+      - uses: actions/setup-java@v4
+        id: targetjdk
+        with:
+          distribution: microsoft
+          java-version: 17
+          architecture: ${{ matrix.jdk }}
+
+      # The runner's own JDK, same distribution and version, since jlink needs jmods of its own version.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: microsoft
+          java-version: 17
+
+      # The host is plain JVM bytecode, so it's the same on every platform.
+      - name: Build extension host
+        working-directory: host
+        shell: bash
+        run: ./gradlew installDist
+
+      # The modules past jdeps' list are ones extensions reach at run time: EC for TLS, extra charsets,
+      # java.sql dates and locale data for date parsing.
+      - name: Bundle
+        shell: bash
+        run: |
+          target_jdk="${{ steps.targetjdk.outputs.path }}"
+          want=$(grep '^JAVA_VERSION=' "$target_jdk/release")
+          have=$(grep '^JAVA_VERSION=' "$JAVA_HOME/release")
+          [ "$want" = "$have" ] || { echo "jlink $have can't link jmods from $want"; exit 1; }
+          exe=""; [ "${{ runner.os }}" = Windows ] && exe=".exe"
+          mkdir -p dist/nano
+          cp "app/target/${{ matrix.target }}/release/nano-reader$exe" dist/nano/
+          cp -R host/build/install/yomi-host dist/nano/host
+          "$JAVA_HOME/bin/jlink" --module-path "$target_jdk/jmods" \
+            --add-modules java.base,java.instrument,java.logging,java.xml,jdk.unsupported,jdk.crypto.ec,jdk.charsets,java.sql,jdk.localedata \
+            --include-locales=en,ja,ko,zh,es,pt,fr,de,it,ru,id,vi,th,tr,ar,pl,uk \
+            --strip-debug --no-man-pages --no-header-files --compress=2 --output dist/nano/host/jre
+          test -f "dist/nano/host/jre/bin/java$exe"
+          du -sh dist/nano dist/nano/host/jre
+          # A tarball keeps the executable bits that upload-artifact's zip drops. Windows doesn't need them.
+          cd dist
+          if [ -n "$exe" ]; then 7z a -bso0 "../nano-${{ matrix.name }}.zip" nano; else tar -czf "../nano-${{ matrix.name }}.tar.gz" nano; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nano-${{ matrix.name }}
+          path: nano-${{ matrix.name }}.*
