@@ -6,6 +6,7 @@
   <img src="https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux-desktop-e85a3c" alt="macOS · Windows · Linux">
   <a href="https://www.gpui.rs"><img src="https://img.shields.io/badge/Rust-GPUI-e85a3c" alt="Rust + GPUI"></a>
   <img src="https://img.shields.io/badge/Mihon-extensions-e85a3c" alt="Mihon extensions">
+  <a href="https://discord.gg/BhgUAXHKzr"><img src="https://img.shields.io/badge/Discord-join-e85a3c" alt="Discord"></a>
 </p>
 
 Nano is a free and open source manga reader for the desktop. It runs the same extensions as [Mihon](https://github.com/mihonapp/mihon) and Tachiyomi, so the sources you use on your phone work on your computer too. The app is native (Rust and [GPUI](https://www.gpui.rs), the UI framework behind Zed), and extensions run in a small JVM host beside it.
@@ -71,6 +72,8 @@ Environment variables:
 macOS is the most complete platform. On Windows the built-in web engine (WebView2) handles Cloudflare checks and extensions that drive a hidden WebView. On Linux the app builds and plain extensions work, but the hidden-WebView calls are not wired up yet.
 
 ## Issues, Feature Requests and Contributing
+
+Questions and quick bug reports are welcome on [Discord](https://discord.gg/BhgUAXHKzr). Anything that needs tracking belongs in a GitHub issue.
 
 <details><summary>Issues</summary>
 
