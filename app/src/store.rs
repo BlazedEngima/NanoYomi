@@ -516,6 +516,14 @@ impl Store {
         }
     }
 
+    /// Categories from a backup file, sent on the next sync.
+    pub(crate) fn restore_categories(&mut self, categories: Vec<Category>) {
+        if !categories.is_empty() {
+            self.take_categories(categories, false);
+            self.data.categories_changed = true;
+        }
+    }
+
     pub fn login(&self, tracker: i64) -> Option<&crate::track::Login> {
         self.data.trackers.get(&tracker)
     }

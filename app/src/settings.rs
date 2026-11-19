@@ -21,6 +21,8 @@ pub struct Settings {
     /// The tracker waiting on the browser, and what the last sign-in said.
     signing_in: Option<i64>,
     track_note: String,
+    /// What the last export or import said.
+    backup_note: String,
 }
 
 impl Settings {
@@ -53,7 +55,7 @@ impl Settings {
         .detach();
         let new_category = plain("New category name", "", cx);
         cx.subscribe(&new_category, |this, _, _: &InputEvent, cx| this.add_category(cx)).detach();
-        Settings { store, covers_cleared: false, pages_cleared: false, sync_host, sync_key, solver, new_category, signing_in: None, track_note: String::new() }
+        Settings { store, covers_cleared: false, pages_cleared: false, sync_host, sync_key, solver, new_category, signing_in: None, track_note: String::new(), backup_note: String::new() }
     }
 
     fn add_category(&mut self, cx: &mut Context<Self>) {
@@ -91,6 +93,50 @@ impl Settings {
                     Ok(login) => {
                         this.store.update(cx, |s, cx| s.set_login(tracker, Some(login), cx));
                         String::new()
+                    }
+                    Err(e) => e,
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn export_backup(&mut self, cx: &mut Context<Self>) {
+        let (bytes, count) = match self.store.read(cx).backup() {
+            Ok(x) => x,
+            Err(e) => {
+                self.backup_note = e;
+                return cx.notify();
+            }
+        };
+        let home = std::env::home_dir().unwrap_or_default();
+        let rx = cx.prompt_for_new_path(&home, Some("nano.tachibk"));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = rx.await else { return };
+            let note = match std::fs::write(&path, bytes) {
+                Ok(()) => format!("Saved {count} series to {}", path.display()),
+                Err(e) => format!("Couldn't save the backup: {e}"),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.backup_note = note;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn import_backup(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Import".into()) });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let _ = this.update(cx, |this, cx| {
+                let restored = std::fs::read(&path).map_err(|e| format!("Couldn't open the file: {e}")).and_then(|b| this.store.update(cx, |s, cx| s.restore(b, cx)));
+                this.backup_note = match restored {
+                    Ok(n) => {
+                        crate::sync::run(this.store.clone(), cx);
+                        format!("Restored {n} series")
                     }
                     Err(e) => e,
                 };
@@ -346,6 +392,37 @@ impl Render for Settings {
                     .child(small_button("sync-now", "Sync now", true).on_click(cx.listener(|this, _, _, cx| this.sync_now(cx)))),
             );
 
+        let backup = div()
+            .w_full()
+            .py(u(14.))
+            .border_t_1()
+            .border_b_1()
+            .border_color(rgb(RULE))
+            .flex()
+            .items_center()
+            .gap_4()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(u(4.))
+                    .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child("Backup"))
+                    .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(
+                        "Your library, categories, reading progress and tracking as a .tachibk file, the same kind Mihon makes. Importing one adds to what's here; it doesn't remove anything.",
+                    ))
+                    .when(!self.backup_note.is_empty(), |d| d.child(div().text_size(u(13.)).text_color(rgb(ACCENT_TEXT)).child(self.backup_note.clone()))),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .gap(u(6.))
+                    .child(small_button("backup-export", "Export", false).on_click(cx.listener(|this, _, _, cx| this.export_backup(cx))))
+                    .child(small_button("backup-import", "Import", false).on_click(cx.listener(|this, _, _, cx| this.import_backup(cx)))),
+            );
+
         let trackers = crate::track::TRACKERS.into_iter().filter(|t| crate::track::configured(*t)).map(|tracker| {
             let user = self.store.read(cx).login(tracker).map(|l| l.user.clone());
             let waiting = self.signing_in == Some(tracker);
@@ -401,6 +478,8 @@ impl Render for Settings {
             .child(tracking)
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("SYNC"))
             .child(sync)
+            .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("BACKUP"))
+            .child(backup)
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("CLOUDFLARE"))
             .child(
                 div()

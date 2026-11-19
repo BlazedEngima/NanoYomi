@@ -378,17 +378,7 @@ fn outgoing(s: &Series, raw: Option<Raw>, now: i64) -> (Msg, Raw) {
     }
     if old.map_or(!s.tracks.is_empty(), |o| o.tracks != s.tracks) {
         let m = &mut raw.manga;
-        let entries: Vec<Msg> = m.all(M_TRACKING).filter_map(Msg::parse).collect();
-        // Trackers Nano doesn't handle (Kitsu and the rest) go back as they came.
-        let mut kept: Vec<Msg> = entries.iter().filter(|e| !crate::track::TRACKERS.contains(&e.int(T_SYNC_ID))).cloned().collect();
-        for t in &s.tracks {
-            let old = entries.iter().find(|e| e.int(T_SYNC_ID) == t.tracker).cloned().unwrap_or_default();
-            kept.push(track_msg(old, t));
-        }
-        *m = m.without(&[M_TRACKING]);
-        for e in &kept {
-            m.push(M_TRACKING, e);
-        }
+        put_tracks(m, &s.tracks);
         m.set_int(M_VERSION, m.int(M_VERSION) + 1);
         m.set_int(M_MODIFIED, secs);
     }
@@ -440,6 +430,20 @@ fn outgoing(s: &Series, raw: Option<Raw>, now: i64) -> (Msg, Raw) {
     (out, raw)
 }
 
+/// Replaces the tracks Nano handles. Trackers it doesn't (Kitsu and the rest) go back as they came.
+fn put_tracks(m: &mut Msg, tracks: &[Track]) {
+    let entries: Vec<Msg> = m.all(M_TRACKING).filter_map(Msg::parse).collect();
+    let mut kept: Vec<Msg> = entries.iter().filter(|e| !crate::track::TRACKERS.contains(&e.int(T_SYNC_ID))).cloned().collect();
+    for t in tracks {
+        let old = entries.iter().find(|e| e.int(T_SYNC_ID) == t.tracker).cloned().unwrap_or_default();
+        kept.push(track_msg(old, t));
+    }
+    *m = m.without(&[M_TRACKING]);
+    for e in &kept {
+        m.push(M_TRACKING, e);
+    }
+}
+
 /// A track over the server's entry for it, so fields Nano doesn't know survive.
 fn track_msg(old: Msg, t: &Track) -> Msg {
     let mut e = old.without(&[T_MEDIA_ID_INT]);
@@ -478,13 +482,14 @@ fn track_of(e: &Msg) -> Track {
 }
 
 /// Takes a server series into Nano. The newer reading position wins.
-fn incoming(series: &mut Vec<Series>, m: &Msg, raw: Option<Raw>, source_names: &HashMap<String, String>) -> Option<(usize, Raw)> {
+/// Sync leaves series that are only in history on the server; a restore brings them in with `history`.
+fn incoming(series: &mut Vec<Series>, m: &Msg, raw: Option<Raw>, source_names: &HashMap<String, String>, history: bool) -> Option<(usize, Raw)> {
     let source = (m.int(M_SOURCE) as u64).to_string();
     let url = m.str(M_URL);
     let favorite = m.bool(M_FAVORITE).unwrap_or(true); // absent is true in Mihon's encoding
     let ix = match series.iter().position(|s| s.source == source && s.url() == url) {
         Some(ix) => ix,
-        None if favorite => {
+        None if favorite || (history && m.all(M_HISTORY).next().is_some()) => {
             let genre: Vec<String> = m.all(M_GENRE).map(|g| String::from_utf8_lossy(g).into_owned()).collect();
             let manga = json!({
                 "url": url, "title": m.str(M_TITLE), "artist": m.str(M_ARTIST), "author": m.str(M_AUTHOR),
@@ -580,6 +585,12 @@ fn gunzip(b: Vec<u8>) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+fn gzip(b: &[u8]) -> Result<Vec<u8>, String> {
+    let mut gz = flate2::write::GzEncoder::new(vec![], flate2::Compression::default());
+    gz.write_all(b).map_err(|e| e.to_string())?;
+    gz.finish().map_err(|e| e.to_string())
+}
+
 struct Reply {
     mangas: Vec<Msg>,
     categories: Vec<crate::store::Category>,
@@ -620,9 +631,7 @@ fn snapshot(cfg: &Config, cursor: i64) -> Result<Option<Reply>, String> {
 }
 
 fn merge(cfg: &Config, body: &Msg, full: bool) -> Result<Reply, String> {
-    let mut gz = flate2::write::GzEncoder::new(vec![], flate2::Compression::default());
-    gz.write_all(&body.encode()).map_err(|e| e.to_string())?;
-    let gz = gz.finish().map_err(|e| e.to_string())?;
+    let gz = gzip(&body.encode())?;
     let host = cfg.host.trim().trim_end_matches('/');
     let mut res = ureq::post(format!("{host}/api/sync/v2/merge"))
         .header("X-API-Token", cfg.key.trim())
@@ -673,6 +682,112 @@ pub fn run(store: Entity<Store>, cx: &mut App) {
     .detach();
 }
 
+fn put_sources(body: &mut Msg, sources: HashMap<String, String>) {
+    for (id, name) in sources {
+        let mut src = Msg::default();
+        src.set_str(1, &name);
+        src.set_int(2, id.parse::<u64>().unwrap_or(0) as i64);
+        body.push(B_SOURCES, &src);
+    }
+}
+
+fn category_msg(c: &crate::store::Category, version: i64) -> Msg {
+    let mut m = Msg::default();
+    m.set_str(CAT_NAME, &c.name);
+    m.set_int(CAT_ORDER, c.order);
+    if c.flags != 0 {
+        m.set_int(CAT_FLAGS, c.flags);
+    }
+    m.set_int(CAT_VERSION, version);
+    m.set_int(CAT_UID, c.uid);
+    m
+}
+
+// Backup files: the same gzipped message as Mihon's .tachibk.
+
+/// One series as Mihon backs it up, with every chapter's read, bookmark and page.
+/// Starts from the synced copy when there is one, so fields from the phone survive.
+fn backup_manga(s: &Series, raw: Option<Raw>) -> Msg {
+    let Raw { manga, chapters } = raw.unwrap_or_else(|| Raw { manga: new_manga(s), chapters: HashMap::new() });
+    let mut m = manga.without(&[M_CATEGORIES, M_CHAPTERS, M_HISTORY]);
+    m.set_int(M_FAVORITE, s.in_library as i64);
+    if s.added_at > 0 {
+        m.set_int(M_ADDED, s.added_at);
+    }
+    for o in &s.categories {
+        m.0.push((M_CATEGORIES, Val::Varint(*o as u64)));
+    }
+    put_tracks(&mut m, &s.tracks);
+    let p = s.progress.as_ref();
+    if s.chapters.is_empty() {
+        // Never opened here, so the synced chapters are all there is.
+        for c in chapters.values() {
+            m.push(M_CHAPTERS, c);
+        }
+    }
+    let read = s.read_flags(&s.chapters);
+    for (i, c) in s.chapters.iter().enumerate() {
+        let url = c["url"].as_str().unwrap_or("");
+        let mut ch = chapters.get(url).cloned().unwrap_or_else(|| new_chapter(c, i));
+        ch.set_int(C_READ, read[i] as i64);
+        ch.set_int(C_BOOKMARK, s.bookmarks.contains(url) as i64);
+        if let Some(p) = p.filter(|p| p.chapter_url == url) {
+            ch.set_int(C_PAGE, p.page as i64);
+        }
+        m.push(M_CHAPTERS, &ch);
+    }
+    if let Some(p) = p {
+        let mut h = Msg::default();
+        h.set_str(H_URL, &p.chapter_url);
+        h.set_int(H_READ_AT, p.at);
+        m.push(M_HISTORY, &h);
+    }
+    m
+}
+
+impl Store {
+    /// The library and history as a Mihon backup file, and how many series it holds.
+    pub fn backup(&self) -> Result<(Vec<u8>, usize), String> {
+        let dir = self.sync_dir();
+        let mut body = Msg::default();
+        let mut sources = HashMap::new();
+        let mut count = 0;
+        for s in self.all_series().iter().filter(|s| !s.url().is_empty() && (s.in_library || s.progress.is_some())) {
+            let raw = s.sync.as_ref().and_then(|_| Raw::load(&dir, &s.source, s.url()));
+            body.push(B_MANGA, &backup_manga(s, raw));
+            sources.insert(s.source.clone(), s.source_name.clone());
+            count += 1;
+        }
+        put_sources(&mut body, sources);
+        for c in self.categories() {
+            body.push(B_CATEGORIES, &category_msg(&c, c.version));
+        }
+        Ok((gzip(&body.encode())?, count))
+    }
+
+    /// Merges a Mihon or Nano backup into the library, the way sync takes the phone's copy.
+    /// Sync's own record stays as it was, so restored changes go up on the next sync.
+    pub fn restore(&mut self, bytes: Vec<u8>, cx: &mut gpui::Context<Self>) -> Result<usize, String> {
+        let reply = decode(bytes, 0, false).map_err(|_| "That file isn't a Mihon backup".to_string())?;
+        if reply.mangas.is_empty() {
+            return Err("That backup has no series in it".into());
+        }
+        self.restore_categories(reply.categories.clone());
+        let mut taken = 0;
+        self.edit_series(cx, |series| {
+            for m in &reply.mangas {
+                let (source, url) = ((m.int(M_SOURCE) as u64).to_string(), m.str(M_URL));
+                let meta = series.iter().find(|s| s.source == source && s.url() == url).and_then(|s| s.sync.clone());
+                if let Some((ix, _)) = incoming(series, m, None, &reply.sources, true) {
+                    series[ix].sync = meta;
+                    taken += 1;
+                }
+            }
+        });
+        Ok(taken)
+    }
+}
+
 pub struct Sent {
     source: String,
     url: String,
@@ -701,24 +816,11 @@ impl Store {
             sources.insert(s.source.clone(), s.source_name.clone());
             sent.push(Sent { source: s.source.clone(), url: s.url().to_string(), snapshot: Snapshot::of(s), raw });
         }
-        for (id, name) in sources {
-            let mut src = Msg::default();
-            src.set_str(1, &name);
-            src.set_int(2, id.parse::<u64>().unwrap_or(0) as i64);
-            body.push(B_SOURCES, &src);
-        }
+        put_sources(&mut body, sources);
         let categories = self.categories_changed();
         if categories {
             for c in self.categories() {
-                let mut m = Msg::default();
-                m.set_str(CAT_NAME, &c.name);
-                m.set_int(CAT_ORDER, c.order);
-                if c.flags != 0 {
-                    m.set_int(CAT_FLAGS, c.flags);
-                }
-                m.set_int(CAT_VERSION, c.version + 1);
-                m.set_int(CAT_UID, c.uid);
-                body.push(B_CATEGORIES, &m);
+                body.push(B_CATEGORIES, &category_msg(&c, c.version + 1));
             }
         }
         (body, sent, categories)
@@ -747,7 +849,7 @@ impl Store {
                 let (source, url) = ((m.int(M_SOURCE) as u64).to_string(), m.str(M_URL));
                 let known = series.iter().any(|s| s.source == source && s.url() == url);
                 let raw = if known { Raw::load(&dir, &source, &url) } else { None };
-                if let Some((_, raw)) = incoming(series, m, raw, &reply.sources) {
+                if let Some((_, raw)) = incoming(series, m, raw, &reply.sources, false) {
                     raw.save(&dir, &source, &url);
                     taken += 1;
                 }
@@ -804,7 +906,7 @@ mod tests {
         m.push(M_HISTORY, &h);
 
         let mut list = vec![];
-        let (_, raw) = incoming(&mut list, &m, None, &HashMap::new()).unwrap();
+        let (_, raw) = incoming(&mut list, &m, None, &HashMap::new(), false).unwrap();
         let s = &mut list[0];
         assert!(s.in_library);
         assert_eq!(s.progress.as_ref().map(|p| (p.chapter_url.as_str(), p.page)), Some(("/c1", 3)));
@@ -845,7 +947,7 @@ mod tests {
         m.push(M_TRACKING, &mal);
         m.push(M_TRACKING, &kitsu);
         let mut list = vec![];
-        let (_, raw) = incoming(&mut list, &m, None, &HashMap::new()).unwrap();
+        let (_, raw) = incoming(&mut list, &m, None, &HashMap::new(), false).unwrap();
         let s = &mut list[0];
         assert_eq!(s.tracks.len(), 1, "only the trackers Nano handles");
         assert_eq!((s.tracks[0].media_id, s.tracks[0].last_read), (2, 4.));
@@ -878,7 +980,7 @@ mod tests {
         let mut list = vec![series()];
         list[0].in_library = true;
         list[0].progress = Some(Progress { chapter_url: "/c1".into(), chapter_name: "".into(), page: 0, pages: 5, at: 1 });
-        let (_, raw) = incoming(&mut list, &m, None, &HashMap::new()).unwrap();
+        let (_, raw) = incoming(&mut list, &m, None, &HashMap::new(), false).unwrap();
         let s = &mut list[0];
         assert_eq!(s.marks.get("/c3"), Some(&true), "read on the phone, so read here too");
         assert!(s.bookmarks.contains("/c2"));
@@ -905,7 +1007,7 @@ mod tests {
         assert_eq!(m.ints(M_CATEGORIES), [2, 5, 7]);
 
         let mut list = vec![];
-        let (_, raw) = incoming(&mut list, &m, None, &HashMap::new()).unwrap();
+        let (_, raw) = incoming(&mut list, &m, None, &HashMap::new(), false).unwrap();
         let s = &mut list[0];
         assert_eq!(s.categories, [2, 5, 7]);
         assert!(!dirty(s));
@@ -917,6 +1019,33 @@ mod tests {
     }
 
     #[test]
+    fn backups_carry_every_chapter_and_restore_to_the_same_series() {
+        let mut s = series();
+        s.in_library = true;
+        s.added_at = 1234;
+        s.categories = vec![2];
+        s.progress = Some(Progress { chapter_url: "/c1".into(), chapter_name: "Ch.1".into(), page: 4, pages: 9, at: 777 });
+        s.bookmarks.insert("/c3".into());
+        s.tracks.push(Track { tracker: 2, media_id: 30, status: 1, ..Track::default() });
+        let m = backup_manga(&s, None);
+        let chs: Vec<Msg> = m.all(M_CHAPTERS).filter_map(Msg::parse).collect();
+        assert_eq!(chs.len(), 4, "unread chapters too, as Mihon expects");
+        let by = |u: &str| chs.iter().find(|c| c.str(C_URL) == u).cloned().unwrap();
+        assert_eq!((by("/c0").bool(C_READ), by("/c3").bool(C_READ)), (Some(true), Some(false)));
+        assert_eq!(by("/c1").int(C_PAGE), 4);
+
+        let mut list = vec![];
+        incoming(&mut list, &m, None, &HashMap::new(), false).unwrap();
+        let back = &list[0];
+        assert!(back.in_library);
+        assert_eq!((back.added_at, back.categories.clone()), (1234, vec![2]));
+        assert_eq!(back.progress.as_ref().map(|p| (p.chapter_url.as_str(), p.page, p.at)), Some(("/c1", 4, 777)));
+        assert!(back.bookmarks.contains("/c3"));
+        assert_eq!(back.tracks.len(), 1);
+        assert_eq!(back.chapters.len(), 4);
+    }
+
+    #[test]
     fn history_only_series_stay_on_the_server() {
         let mut m = new_manga(&series());
         m.set_int(M_FAVORITE, 0);
@@ -925,7 +1054,9 @@ mod tests {
         h.set_int(H_READ_AT, 1000);
         m.push(M_HISTORY, &h);
         let mut list = vec![];
-        assert!(incoming(&mut list, &m, None, &HashMap::new()).is_none());
+        assert!(incoming(&mut list, &m, None, &HashMap::new(), false).is_none());
         assert!(list.is_empty());
+        let (ix, _) = incoming(&mut list, &m, None, &HashMap::new(), true).expect("a restore keeps history");
+        assert!(!list[ix].in_library && list[ix].progress.is_some());
     }
 }
