@@ -297,8 +297,7 @@ impl Raw {
     }
 
     fn path(dir: &Path, source: &str, url: &str) -> PathBuf {
-        // FNV-1a, because DefaultHasher can change between Rust versions.
-        let h = format!("{source}|{url}").bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+        let h = crate::fnv(&format!("{source}|{url}"));
         dir.join(format!("{h:016x}.pb"))
     }
 

@@ -72,7 +72,7 @@ pub fn add_repo(input: &str) -> Result<Repo, String> {
 }
 
 fn cache_file(data_dir: &Path, repo: &Repo) -> PathBuf {
-    let hash = repo.url.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    let hash = crate::fnv(&repo.url);
     data_dir.join("repos").join(format!("{hash:016x}.json"))
 }
 

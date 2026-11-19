@@ -48,10 +48,7 @@ pub fn clear_cache() {
 }
 
 fn cache_path(url: &str) -> Option<PathBuf> {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    url.hash(&mut h);
-    CACHE_DIR.get().map(|d| d.join(format!("{:016x}", h.finish())))
+    CACHE_DIR.get().map(|d| d.join(format!("{:016x}", crate::fnv(url))))
 }
 
 fn fresh(path: &Path) -> bool {
@@ -117,6 +114,8 @@ async fn fetch(how: Fetch, cx: &mut gpui::AsyncApp, url: &str) -> Result<Picture
 pub struct Covers {
     requested: HashSet<String>,
     failed: HashSet<String>,
+    /// Not on disk while its extension isn't loaded. Tried again once there's a source to fetch from.
+    missing: HashSet<String>,
 }
 
 impl Covers {
@@ -133,7 +132,8 @@ impl Covers {
         if let Some(picture) = cache.update(cx, |c, _| c.get(url)) {
             return picture.first().cloned();
         }
-        if self.failed.contains(url) || !self.requested.insert(url.to_string()) {
+        let offline = how.is_none();
+        if self.failed.contains(url) || (offline && self.missing.contains(url)) || !self.requested.insert(url.to_string()) {
             return None;
         }
         let (url, cache) = (url.to_string(), cache.clone());
@@ -154,6 +154,9 @@ impl Covers {
                         let evicted = cache.update(cx, |c, _| c.insert(url, picture));
                         drop_images(cx, None, evicted);
                         cx.notify();
+                    }
+                    Err(_) if offline => {
+                        covers.missing.insert(url);
                     }
                     Err(e) => {
                         eprintln!("cover: {e}");

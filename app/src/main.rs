@@ -277,6 +277,11 @@ mod tests {
     }
 }
 
+/// FNV-1a, for file names that must stay the same across Rust versions (DefaultHasher can change).
+pub fn fnv(s: &str) -> u64 {
+    s.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+}
+
 pub fn demo() -> Option<usize> {
     std::env::var("NANO_DEMO").ok().map(|v| v.parse().unwrap_or(0))
 }
