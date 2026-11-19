@@ -52,6 +52,8 @@ pub struct Reader {
     pages: Vec<Value>,
     page: usize,
     mode: Mode,
+    /// Paged mode turns right to left: the left arrow and left side go forward.
+    rtl: bool,
     strip: ListState,
     inflight: HashSet<usize>,
     /// Pages that failed. They're retried when the reader moves.
@@ -89,6 +91,7 @@ impl Reader {
         focus.focus(window, cx);
         let vertical = crate::demo_mode() == "vertical" || store.read(cx).prefs().vertical_reader;
         let mode = if vertical { Mode::Vertical } else { Mode::Paged };
+        let rtl = store.read(cx).prefs().right_to_left;
         let mut this = Reader {
             source,
             cache,
@@ -99,6 +102,7 @@ impl Reader {
             pages: vec![],
             page: 0,
             mode,
+            rtl,
             strip: ListState::new(0, ListAlignment::Top, px(1500.)),
             inflight: HashSet::new(),
             failed: HashSet::new(),
@@ -250,6 +254,21 @@ impl Reader {
             self.sync(Some(window), cx);
             cx.notify();
         }
+    }
+
+    /// Which way the right arrow and the right side of the page turn.
+    fn forward(&self) -> isize {
+        if self.rtl { -1 } else { 1 }
+    }
+
+    /// Paged, left to right or right to left.
+    fn set_direction(&mut self, rtl: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == Mode::Vertical {
+            self.toggle_mode(window, cx);
+        }
+        self.rtl = rtl;
+        self.store.update(cx, |s, cx| s.edit_prefs(cx, |p| p.right_to_left = rtl));
+        cx.notify();
     }
 
     fn toggle_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -420,6 +439,7 @@ impl Reader {
             return;
         }
         let t = match self.mode {
+            Mode::Paged if self.rtl => f32::from(bounds.origin.x + bounds.size.width - pos.x) / f32::from(bounds.size.width),
             Mode::Paged => f32::from(pos.x - bounds.origin.x) / f32::from(bounds.size.width),
             Mode::Vertical => f32::from(pos.y - bounds.origin.y) / f32::from(bounds.size.height),
         };
@@ -444,7 +464,8 @@ impl Reader {
         let (vw, vh) = (f32::from(self.viewport.width), f32::from(self.viewport.height));
         let length = if vertical { vh - f32::from(crate::u(72. + 112.)) } else { (vw * 0.6).min(f32::from(crate::u(640.))) };
         let step = dot_step(length, n);
-        let at = |i: usize| relative(i as f32 / (n - 1) as f32);
+        let flip = self.rtl && !vertical;
+        let at = |i: usize| relative(if flip { 1. - i as f32 / (n - 1) as f32 } else { i as f32 / (n - 1) as f32 });
         let dot = |i: usize, size: f32, color: u32| {
             let d = div().absolute().size(crate::u(size)).rounded_full().bg(rgb(color));
             let half = crate::u(-size / 2.);
@@ -586,8 +607,10 @@ impl Reader {
             (_, "escape") if self.chapter_menu => self.toggle_chapter_menu(cx),
             (_, "escape") => cx.emit(ReaderEvent::Close),
             (_, "v") => self.toggle_mode(window, cx),
-            (Mode::Paged, "right" | "space" | "pagedown" | "down") => self.go(1, window, cx),
-            (Mode::Paged, "left" | "pageup" | "up") => self.go(-1, window, cx),
+            (Mode::Paged, "space" | "pagedown" | "down") => self.go(1, window, cx),
+            (Mode::Paged, "pageup" | "up") => self.go(-1, window, cx),
+            (Mode::Paged, "right") => self.go(self.forward(), window, cx),
+            (Mode::Paged, "left") => self.go(-self.forward(), window, cx),
             (Mode::Vertical, "space" | "pagedown" | "down" | "right") => {
                 self.strip.scroll_by(px(screen));
                 cx.notify();
@@ -788,7 +811,7 @@ impl Render for Reader {
                         .left_0()
                         .w(relative(1. / 3.))
                         .h_full()
-                        .on_click(cx.listener(|this, _, window, cx| this.go(-1, window, cx))),
+                        .on_click(cx.listener(|this, _, window, cx| this.go(-this.forward(), window, cx))),
                 )
                 .child(
                     div()
@@ -798,11 +821,10 @@ impl Render for Reader {
                         .right_0()
                         .w(relative(1. / 3.))
                         .h_full()
-                        .on_click(cx.listener(|this, _, window, cx| this.go(1, window, cx))),
+                        .on_click(cx.listener(|this, _, window, cx| this.go(this.forward(), window, cx))),
                 );
         }
-        let mode_button = |id: &'static str, label: &'static str, mode: Mode, current: Mode| {
-            let on = mode == current;
+        let mode_button = |id: &'static str, label: &'static str, on: bool| {
             div()
                 .id(id)
                 .h(crate::u(36.))
@@ -825,6 +847,7 @@ impl Render for Reader {
             root.when(len > 1, |r| r.child(self.scrubber(cx)))
         };
         let (has_prev, has_next) = (self.chapter + 1 < self.chapters.len(), self.chapter > 0);
+        let paged = self.mode == Mode::Paged;
         let corner = |id: &'static str| div().id(id).absolute().bottom(crate::u(28.)).flex().flex_col().gap_1().font_family(MONO).text_size(crate::u(12.)).text_color(rgb(FAINT)).bg(rgba(0x0D0C0BB0)).px_2().py_1().rounded(crate::u(4.));
         let hover = |this: &mut Self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>| {
             if *hovered {
@@ -846,34 +869,31 @@ impl Render for Reader {
                         .bg(rgb(SURFACE))
                         .border_1()
                         .border_color(rgb(crate::LINE))
-                        .child(mode_button("prev-ch", "‹", Mode::Paged, Mode::Vertical).when(!has_prev, |d| d.opacity(0.3)).on_click(cx.listener(|this, _, _, cx| {
+                        .child(mode_button("prev-ch", "‹", false).when(!has_prev, |d| d.opacity(0.3)).on_click(cx.listener(|this, _, _, cx| {
                             cx.stop_propagation();
                             this.prev_chapter(cx)
                         })))
-                        .child(mode_button("chapters", "Chapters", Mode::Paged, if self.chapter_menu { Mode::Paged } else { Mode::Vertical }).on_click(cx.listener(|this, _, _, cx| {
+                        .child(mode_button("chapters", "Chapters", self.chapter_menu).on_click(cx.listener(|this, _, _, cx| {
                             cx.stop_propagation();
                             this.toggle_chapter_menu(cx)
                         })))
-                        .child(mode_button("next-ch", "›", Mode::Paged, Mode::Vertical).when(!has_next, |d| d.opacity(0.3)).on_click(cx.listener(|this, _, _, cx| {
+                        .child(mode_button("next-ch", "›", false).when(!has_next, |d| d.opacity(0.3)).on_click(cx.listener(|this, _, _, cx| {
                             cx.stop_propagation();
                             if this.chapter > 0 {
                                 this.next_chapter(cx)
                             }
                         })))
                         .child(div().w(px(1.)).h(crate::u(20.)).mx(crate::u(4.)).bg(rgb(LINE)))
-                        .child(mode_button("paged", "Paged", Mode::Paged, self.mode).on_click(cx.listener(|this, _, window, cx| {
-                            if this.mode != Mode::Paged {
-                                this.toggle_mode(window, cx)
-                            }
-                        })))
-                        .child(mode_button("vertical", "Vertical", Mode::Vertical, self.mode).on_click(cx.listener(
+                        .child(mode_button("ltr", "Left to right", paged && !self.rtl).on_click(cx.listener(|this, _, window, cx| this.set_direction(false, window, cx))))
+                        .child(mode_button("rtl", "Right to left", paged && self.rtl).on_click(cx.listener(|this, _, window, cx| this.set_direction(true, window, cx))))
+                        .child(mode_button("vertical", "Vertical", !paged).on_click(cx.listener(
                             |this, _, window, cx| {
                                 if this.mode != Mode::Vertical {
                                     this.toggle_mode(window, cx)
                                 }
                             },
                         )))
-                        .child(mode_button("close", "Close", Mode::Paged, Mode::Vertical).on_click(cx.listener(|_, _, _, cx| cx.emit(ReaderEvent::Close)))),
+                        .child(mode_button("close", "Close", false).on_click(cx.listener(|_, _, _, cx| cx.emit(ReaderEvent::Close)))),
                 ),
             )
     }

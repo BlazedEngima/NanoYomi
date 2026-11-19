@@ -277,9 +277,19 @@ impl Render for Settings {
                     ))),
             )
             .child(div().flex_none().flex().gap(u(6.)).child(auto_chip("auto-off", "Off", false, self.store.clone())).child(auto_chip("auto-on", "On", true, self.store.clone())));
-        let vertical = self.store.read(cx).prefs().vertical_reader;
-        let mode_chip = |id: &'static str, label: &'static str, value: bool, store: Entity<Store>| {
-            small_button(id, label, vertical == value).on_click(move |_, _, cx| store.update(cx, |s, cx| s.edit_prefs(cx, |p| p.vertical_reader = value)))
+        let prefs = self.store.read(cx).prefs();
+        let current = (prefs.vertical_reader, prefs.right_to_left && !prefs.vertical_reader);
+        let mode_chip = |id: &'static str, label: &'static str, value: (bool, bool), store: Entity<Store>| {
+            small_button(id, label, current == value).on_click(move |_, _, cx| {
+                store.update(cx, |s, cx| {
+                    s.edit_prefs(cx, |p| {
+                        p.vertical_reader = value.0;
+                        if !value.0 {
+                            p.right_to_left = value.1;
+                        }
+                    })
+                })
+            })
         };
         let reading = div()
             .w_full()
@@ -299,10 +309,10 @@ impl Render for Settings {
                     .gap(u(4.))
                     .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child("Reading mode"))
                     .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(
-                        "How chapters open. Paged shows one page at a time; Vertical scrolls them as one strip, for webtoons. Pressing V in the reader changes this too.",
+                        "How chapters open. The paged modes show one page at a time; most manga reads right to left. Vertical scrolls pages as one strip, for webtoons. Pressing V in the reader switches between paged and vertical.",
                     )),
             )
-            .child(div().flex_none().flex().gap(u(6.)).child(mode_chip("mode-paged", "Paged", false, self.store.clone())).child(mode_chip("mode-vertical", "Vertical", true, self.store.clone())));
+            .child(div().flex_none().flex().gap(u(6.)).child(mode_chip("mode-ltr", "Left to right", (false, false), self.store.clone())).child(mode_chip("mode-rtl", "Right to left", (false, true), self.store.clone())).child(mode_chip("mode-vertical", "Vertical", (true, false), self.store.clone())));
         let chosen = self.store.read(cx).prefs().host_heap_mb;
         let auto = crate::host::auto_heap_mb();
         let effective = chosen.unwrap_or(auto);

@@ -237,6 +237,9 @@ pub struct Prefs {
     pub host_heap_mb: Option<u32>,
     #[serde(default)]
     pub vertical_reader: bool,
+    /// Paged mode turns pages right to left, as most manga reads.
+    #[serde(default)]
+    pub right_to_left: bool,
     #[serde(default)]
     pub sidebar_collapsed: bool,
     #[serde(default)]
