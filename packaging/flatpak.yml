@@ -22,4 +22,4 @@ modules:
       - install -Dm644 packaging/app.nano.Reader.desktop /app/share/applications/app.nano.Reader.desktop
     sources:
       - type: dir
-        path: stage
+        path: ../stage
