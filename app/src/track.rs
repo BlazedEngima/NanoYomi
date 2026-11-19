@@ -12,7 +12,7 @@ pub const ANILIST: i64 = 2;
 pub const TRACKERS: [i64; 2] = [MAL, ANILIST];
 
 const MAL_CLIENT: &str = "ec51dd01e909b73bd7873a2e62e742b4";
-const ANILIST_CLIENT: &str = "";
+const ANILIST_CLIENT: &str = "57476";
 /// Where both sites send you after sign-in. Registered with each, so don't change it.
 const PORT: u16 = 47621;
 
