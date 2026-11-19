@@ -1,0 +1,52 @@
+# Windows ARM64 build, cross-compiled on the x64 runner since hosted ARM runners are public-repo only.
+name: Windows ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["app/**", "host/**", ".github/workflows/windows-arm64.yml"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup target add aarch64-pc-windows-msvc
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/target
+          key: win-arm64-${{ hashFiles('app/Cargo.lock') }}
+          restore-keys: win-arm64-
+
+      # ring builds its C with clang for ARM64, which the runner image ships.
+      - name: Build app
+        working-directory: app
+        run: cargo build --release --target aarch64-pc-windows-msvc
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # The host is plain JVM bytecode, so one build serves every platform.
+      - name: Build extension host
+        working-directory: host
+        run: ./gradlew.bat installDist
+
+      - name: Bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory nano | Out-Null
+          Copy-Item app/target/aarch64-pc-windows-msvc/release/nano-reader.exe nano/
+          Copy-Item -Recurse host/build/install/yomi-host nano/host
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nano-windows-arm64
+          path: nano

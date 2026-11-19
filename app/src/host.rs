@@ -159,11 +159,14 @@ fn heap_scales_with_memory() {
     assert_eq!(heap_for(64 * gb), 256);
 }
 
-/// $NANO_HOST, or the dev build next to this crate.
+/// $NANO_HOST, then a `host` folder beside the app (a packaged build), then the dev build next to this crate.
 pub fn host_bin() -> PathBuf {
-    std::env::var_os("NANO_HOST").map(PathBuf::from).unwrap_or_else(|| {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../host/build/install/yomi-host/bin/yomi-host")
-    })
+    let name = if cfg!(windows) { "yomi-host.bat" } else { "yomi-host" };
+    if let Some(p) = std::env::var_os("NANO_HOST") {
+        return p.into();
+    }
+    let packaged = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.join("host/bin").join(name)));
+    packaged.filter(|p| p.exists()).unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../host/build/install/yomi-host/bin").join(name))
 }
 
 #[cfg(test)]
