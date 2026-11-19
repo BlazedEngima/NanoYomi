@@ -357,15 +357,31 @@ impl Root {
             cx.subscribe_in(&library, window, |this, _, _: &GoBrowse, window, cx| this.show(Tab::Browse, window, cx)),
         ];
         let tab = if demo().is_some() { Tab::Browse } else { Tab::Library };
-        // NANO_TAB=settings|browse starts on that tab (for testing).
-        let tab = match std::env::var("NANO_TAB").as_deref() { Ok("settings") => Tab::Settings, Ok("browse") => Tab::Browse, Ok("search") => Tab::Search, _ => tab };
+        // NANO_TAB=library|browse|extensions|history|settings|search starts on that tab (for testing).
+        let tab = match std::env::var("NANO_TAB").as_deref() {
+            Ok("library") => Tab::Library,
+            Ok("browse") => Tab::Browse,
+            Ok("extensions") => Tab::Extensions,
+            Ok("history") => Tab::History,
+            Ok("settings") => Tab::Settings,
+            Ok("search") => Tab::Search,
+            _ => tab,
+        };
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let settings = (tab == Tab::Settings).then(|| {
             let store = store.clone();
             cx.new(|cx| settings::Settings::new(store, cx))
         });
-        Root { cache, store, registry, tab, library, browse, global, catalog: None, history: None, settings, manga: None, migrate: None, reader: None, palette: None, closing: None, panel_moves: 0, sidebar_moves: 0, focus, _subs: subs }
+        let catalog = (tab == Tab::Extensions).then(|| {
+            let (registry, store, cache) = (registry.clone(), store.clone(), cache.clone());
+            cx.new(|cx| Catalog::new(registry, store, cache, cx))
+        });
+        let history = (tab == Tab::History).then(|| {
+            let (store, registry, cache) = (store.clone(), registry.clone(), cache.clone());
+            cx.new(|cx| History::new(store, registry, cache, cx))
+        });
+        Root { cache, store, registry, tab, library, browse, global, catalog, history, settings, manga: None, migrate: None, reader: None, palette: None, closing: None, panel_moves: 0, sidebar_moves: 0, focus, _subs: subs }
     }
 
     fn zoom_by(&mut self, delta: f32, cx: &mut Context<Self>) {
