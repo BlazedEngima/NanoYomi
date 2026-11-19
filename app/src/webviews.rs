@@ -328,10 +328,7 @@ impl WebViewHost {
     fn build(&self, view: i64, width: f64, height: f64, window: &mut Window) -> wry::Result<wry::WebView> {
         let ipc_host = self.host.clone();
         let load_host = self.host.clone();
-        let builder = wry::WebViewBuilder::new();
-        #[cfg(windows)]
-        let builder = wry::WebViewBuilderExtWindows::with_additional_browser_args(builder, native::BROWSER_ARGS);
-        let wv = builder
+        let wv = builder()
             .with_bounds(rect(width, height))
             .with_initialization_script_for_main_only(BOOTSTRAP, false)
             .with_ipc_handler(move |req| {
@@ -611,6 +608,14 @@ pub(crate) mod native {
     }
 
     pub fn touch(_: &WebView, _: i64, _: f64, _: f64) {}
+}
+
+/// Every WebView Nano makes starts here. WebView2 refuses a second view whose browser options differ.
+pub fn builder() -> wry::WebViewBuilder<'static> {
+    let builder = wry::WebViewBuilder::new();
+    #[cfg(windows)]
+    let builder = wry::WebViewBuilderExtWindows::with_additional_browser_args(builder, native::BROWSER_ARGS);
+    builder
 }
 
 /// JavaScript that's true when the page's origin matches one of Chromium's origin rules.

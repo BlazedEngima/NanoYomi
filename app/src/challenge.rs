@@ -46,7 +46,7 @@ pub fn solve(cx: &mut App, host: Arc<Host>, url: String, user_agent: String) -> 
     let opened = cx.open_window(options, |window, cx| {
         cx.new(|cx| {
             let viewport = window.viewport_size();
-            let webview = wry::WebViewBuilder::new()
+            let webview = crate::webviews::builder()
                 .with_url(&url)
                 .with_user_agent(&user_agent)
                 .with_bounds(rect(viewport))
