@@ -745,6 +745,30 @@ fn backup_manga(s: &Series, raw: Option<Raw>) -> Msg {
     m
 }
 
+/// Takes backup series in. Only adds: a series already here stays in the library and keeps its categories,
+/// and sync's own record stays as it was, so restored changes go up on the next sync.
+fn restore_series(series: &mut Vec<Series>, mangas: &[Msg], sources: &HashMap<String, String>) -> usize {
+    let mut taken = 0;
+    for m in mangas {
+        let (source, url) = ((m.int(M_SOURCE) as u64).to_string(), m.str(M_URL));
+        let before = series.iter().find(|s| s.source == source && s.url() == url).cloned();
+        if let Some((ix, _)) = incoming(series, m, None, sources, true) {
+            let s = &mut series[ix];
+            if let Some(old) = before {
+                s.in_library |= old.in_library;
+                let added: Vec<i64> = s.categories.iter().copied().filter(|c| !old.categories.contains(c)).collect();
+                s.categories = old.categories.into_iter().chain(added).collect();
+                // The backup's unread chapters and missing bookmarks don't undo ones made here.
+                s.marks.extend(old.marks.into_iter().filter(|(_, read)| *read));
+                s.bookmarks.extend(old.bookmarks);
+                s.sync = old.sync;
+            }
+            taken += 1;
+        }
+    }
+    taken
+}
+
 impl Store {
     /// The library and history as a Mihon backup file, and how many series it holds.
     pub fn backup(&self) -> Result<(Vec<u8>, usize), String> {
@@ -765,8 +789,7 @@ impl Store {
         Ok((gzip(&body.encode())?, count))
     }
 
-    /// Merges a Mihon or Nano backup into the library, the way sync takes the phone's copy.
-    /// Sync's own record stays as it was, so restored changes go up on the next sync.
+    /// Merges a Mihon or Nano backup into the library. Newer reading progress wins; nothing is removed.
     pub fn restore(&mut self, bytes: Vec<u8>, cx: &mut gpui::Context<Self>) -> Result<usize, String> {
         let reply = decode(bytes, 0, false).map_err(|_| "That file isn't a Mihon backup".to_string())?;
         if reply.mangas.is_empty() {
@@ -774,16 +797,7 @@ impl Store {
         }
         self.restore_categories(reply.categories.clone());
         let mut taken = 0;
-        self.edit_series(cx, |series| {
-            for m in &reply.mangas {
-                let (source, url) = ((m.int(M_SOURCE) as u64).to_string(), m.str(M_URL));
-                let meta = series.iter().find(|s| s.source == source && s.url() == url).and_then(|s| s.sync.clone());
-                if let Some((ix, _)) = incoming(series, m, None, &reply.sources, true) {
-                    series[ix].sync = meta;
-                    taken += 1;
-                }
-            }
-        });
+        self.edit_series(cx, |series| taken = restore_series(series, &reply.mangas, &reply.sources));
         Ok(taken)
     }
 }
@@ -1043,6 +1057,30 @@ mod tests {
         assert!(back.bookmarks.contains("/c3"));
         assert_eq!(back.tracks.len(), 1);
         assert_eq!(back.chapters.len(), 4);
+    }
+
+    #[test]
+    fn restoring_an_old_backup_removes_nothing() {
+        // The backup has the series out of the library, in category 1.
+        let mut old = series();
+        old.categories = vec![1];
+        old.progress = Some(Progress { chapter_url: "/c3".into(), chapter_name: "".into(), page: 0, pages: 5, at: 10 });
+        let m = backup_manga(&old, None);
+        // Here it's in the library, in category 2, read further.
+        let mut here = series();
+        here.in_library = true;
+        here.categories = vec![2];
+        here.progress = Some(Progress { chapter_url: "/c1".into(), chapter_name: "".into(), page: 2, pages: 5, at: 99 });
+        here.marks.insert("/c0".into(), true);
+        here.bookmarks.insert("/c2".into());
+        let mut list = vec![here];
+        assert_eq!(restore_series(&mut list, &[m], &HashMap::new()), 1);
+        assert!(list[0].in_library);
+        assert_eq!(list[0].categories, [2, 1]);
+        assert_eq!(list[0].progress.as_ref().map(|p| p.chapter_url.as_str()), Some("/c1"), "newer progress kept");
+        assert_eq!(list[0].marks.get("/c0"), Some(&true), "read here stays read");
+        assert!(list[0].bookmarks.contains("/c2"));
+        assert!(list[0].sync.is_none(), "still unsynced, so it goes up next sync");
     }
 
     #[test]
