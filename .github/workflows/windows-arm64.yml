@@ -29,9 +29,18 @@ jobs:
         working-directory: app
         run: cargo build --release --target aarch64-pc-windows-msvc
 
+      # The ARM64 JDK is only a source of jmods for jlink; it can't run here.
+      - uses: actions/setup-java@v4
+        id: armjdk
+        with:
+          distribution: microsoft
+          java-version: 17
+          architecture: aarch64
+
+      # Same distribution and version as above, since jlink needs jmods of its own version.
       - uses: actions/setup-java@v4
         with:
-          distribution: temurin
+          distribution: microsoft
           java-version: 17
 
       # The host is plain JVM bytecode, so one build serves every platform.
@@ -45,6 +54,22 @@ jobs:
           New-Item -ItemType Directory nano | Out-Null
           Copy-Item app/target/aarch64-pc-windows-msvc/release/nano-reader.exe nano/
           Copy-Item -Recurse host/build/install/yomi-host nano/host
+
+      # A trimmed Java runtime, so users needn't install Java. The modules past jdeps' list are ones extensions
+      # reach at run time: EC for TLS, extra charsets, java.sql dates and locale data for date parsing.
+      - name: Bundle Java runtime
+        shell: pwsh
+        run: |
+          $arm = "${{ steps.armjdk.outputs.path }}"
+          $want = Select-String -Path "$arm/release" -Pattern '^JAVA_VERSION='
+          $have = Select-String -Path "$env:JAVA_HOME/release" -Pattern '^JAVA_VERSION='
+          if ("$want" -ne "$have") { throw "jlink $have can't link jmods from $want" }
+          jlink --module-path "$arm/jmods" `
+            --add-modules java.base,java.instrument,java.logging,java.xml,jdk.unsupported,jdk.crypto.ec,jdk.charsets,java.sql,jdk.localedata `
+            --include-locales=en,ja,ko,zh,es,pt,fr,de,it,ru,id,vi,th,tr,ar,pl,uk `
+            --strip-debug --no-man-pages --no-header-files --compress=2 --output nano/host/jre
+          if (-not (Test-Path nano/host/jre/bin/java.exe)) { throw "no java.exe in the runtime" }
+          "{0:N0} MB" -f ((Get-ChildItem -Recurse nano/host/jre | Measure-Object Length -Sum).Sum / 1MB)
 
       - uses: actions/upload-artifact@v4
         with:

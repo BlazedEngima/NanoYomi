@@ -40,7 +40,12 @@ pub struct Host {
 
 impl Host {
     pub fn spawn(bin: &Path, data_dir: &Path, heap_mb: u32) -> std::io::Result<Arc<Host>> {
-        let mut child = Command::new(bin)
+        let mut cmd = Command::new(bin);
+        // A packaged build carries its own trimmed Java runtime beside bin/, so users needn't install Java.
+        if let Some(jre) = bin.parent().and_then(Path::parent).map(|d| d.join("jre")).filter(|j| j.exists()) {
+            cmd.env("JAVA_HOME", jre);
+        }
+        let mut child = cmd
             .arg(data_dir)
             // The launcher adds these after its own defaults, so this -Xmx beats the built-in 64m.
             .env("YOMI_HOST_OPTS", format!("-Xmx{heap_mb}m"))
