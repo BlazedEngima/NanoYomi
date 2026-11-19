@@ -61,8 +61,8 @@ jobs:
         shell: pwsh
         run: |
           $arm = "${{ steps.armjdk.outputs.path }}"
-          $want = Select-String -Path "$arm/release" -Pattern '^JAVA_VERSION='
-          $have = Select-String -Path "$env:JAVA_HOME/release" -Pattern '^JAVA_VERSION='
+          $want = (Select-String -Path "$arm/release" -Pattern '^JAVA_VERSION=').Line
+          $have = (Select-String -Path "$env:JAVA_HOME/release" -Pattern '^JAVA_VERSION=').Line
           if ("$want" -ne "$have") { throw "jlink $have can't link jmods from $want" }
           jlink --module-path "$arm/jmods" `
             --add-modules java.base,java.instrument,java.logging,java.xml,jdk.unsupported,jdk.crypto.ec,jdk.charsets,java.sql,jdk.localedata `
