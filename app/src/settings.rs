@@ -212,7 +212,7 @@ impl Render for Settings {
                     .gap(u(4.))
                     .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child("Page cache"))
                     .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(
-                        "Chapter pages you’ve read stay on disk, so going back doesn’t download them again. Past the limit, the longest-unread pages go first.",
+                        "Read pages stay on disk, up to the limit.",
                     )),
             )
             .child(div().flex_none().flex().gap(u(6.)).children(caps))
@@ -273,7 +273,7 @@ impl Render for Settings {
                     .gap(u(4.))
                     .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child("Download new chapters"))
                     .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(format!(
-                        "When Nano finds new chapters for series in your library, it downloads them for reading offline. Saved in {folder}"
+                        "Downloads new library chapters to {folder}"
                     ))),
             )
             .child(div().flex_none().flex().gap(u(6.)).child(auto_chip("auto-off", "Off", false, self.store.clone())).child(auto_chip("auto-on", "On", true, self.store.clone())));
@@ -309,7 +309,7 @@ impl Render for Settings {
                     .gap(u(4.))
                     .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child("Reading mode"))
                     .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(
-                        "How chapters open. The paged modes show one page at a time; most manga reads right to left. Vertical scrolls pages as one strip, for webtoons. Pressing V in the reader switches between paged and vertical.",
+                        "How chapters open. Press V in the reader to switch between paged and vertical.",
                     )),
             )
             .child(div().flex_none().flex().gap(u(6.)).child(mode_chip("mode-ltr", "Left to right", (false, false), self.store.clone())).child(mode_chip("mode-rtl", "Right to left", (false, true), self.store.clone())).child(mode_chip("mode-vertical", "Vertical", (true, false), self.store.clone())));
@@ -343,7 +343,7 @@ impl Render for Settings {
                     .gap(u(4.))
                     .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child("Extension memory"))
                     .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(
-                        "How much memory extensions may use. More helps sources with heavy pages; less keeps Nano lighter. Auto sizes it for this computer.",
+                        "How much memory extensions can use.",
                     ))
                     .when(restart, |d| d.child(div().text_size(u(13.)).text_color(rgb(ACCENT_TEXT)).child("Restart Nano to apply"))),
             )
@@ -378,7 +378,7 @@ impl Render for Settings {
                             .gap(u(4.))
                             .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child("SyncYomi"))
                             .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(
-                                "Keeps your library and reading progress in step with Mihon forks that sync with SyncYomi (TachiyomiSY, Komikku). Use the same server and API key as on your phone. Syncs when Nano starts and when you close a chapter.",
+                                "Syncs library and progress. Use the same server and API key as on your phone.",
                             )),
                     )
                     .child(
@@ -420,7 +420,7 @@ impl Render for Settings {
                     .gap(u(4.))
                     .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child("Backup"))
                     .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(
-                        "Your library, categories, reading progress and tracking as a .tachibk file, the same kind Mihon makes. Importing one adds to what's here; it doesn't remove anything.",
+                        "Library, categories, progress and tracking as a Mihon .tachibk file.",
                     ))
                     .when(!self.backup_note.is_empty(), |d| d.child(div().text_size(u(13.)).text_color(rgb(ACCENT_TEXT)).child(self.backup_note.clone()))),
             )
@@ -510,7 +510,7 @@ impl Render for Settings {
                             .gap(u(4.))
                             .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child("Solver"))
                             .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(
-                                "Nano passes Cloudflare checks on its own and only asks you to click when a site insists. If you run FlareSolverr or Byparr somewhere, add its address and Nano will try it first.",
+                                "Optional FlareSolverr or Byparr address, tried first.",
                             )),
                     )
                     .child(div().flex_none().w(u(340.)).child(self.solver.clone())),
