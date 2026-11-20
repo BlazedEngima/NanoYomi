@@ -153,6 +153,8 @@ jobs:
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           EOF
+          # codesign takes the JRE's legal/java.xml folder for a nested bundle, so the notices move out of MacOS.
+          [ -d "$c/MacOS/host/jre/legal" ] && mv "$c/MacOS/host/jre/legal" "$c/Resources/jre-legal"
           codesign --force --deep -s - dist/Nano.app
           mkdir dist/dmg && cp -R dist/Nano.app dist/dmg/ && ln -s /Applications dist/dmg/Applications
           hdiutil create -volname Nano -srcfolder dist/dmg -ov -format UDZO "nano-${{ matrix.name }}.dmg"
