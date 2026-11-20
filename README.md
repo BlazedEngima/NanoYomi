@@ -99,3 +99,7 @@ Describe what you want to do and why. Source requests belong in the extension re
 ## Disclaimer
 
 Nano isn't affiliated with Mihon, Tachiyomi or any extension repo. It doesn't host any content; extensions fetch it from third-party sites.
+
+## License
+
+NanoYomi is licensed under the [Mozilla Public License 2.0](./LICENSE).

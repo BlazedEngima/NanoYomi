@@ -2,6 +2,7 @@
 name = "nano-reader"
 version = "0.1.0"
 edition = "2024"
+license = "MPL-2.0"
 
 [dependencies]
 gpui = { git = "https://github.com/Chelys-Bit-Perfect-Player/gpui", rev = "1e8029bb9320a993259166127af633bf200bcd88" }
