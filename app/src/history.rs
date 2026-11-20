@@ -92,7 +92,7 @@ impl Render for History {
             .size_full()
             .flex()
             .flex_col()
-            .child(div().px(u(PAD)).pt(u(28.)).child(heading("History", format!("{count} series"))))
+            .child(div().px(u(PAD)).pt(u(28.)).pb(u(12.)).child(heading("History", format!("{count} series"))))
             .children((count == 0).then(|| div().px(u(PAD)).pt(u(20.)).text_color(rgb(MUTED)).child("Nothing read yet.")))
             .child(
                 uniform_list(
@@ -104,7 +104,7 @@ impl Render for History {
                             .map(|row| {
                                 let cards: Vec<AnyElement> =
                                     (row * cols..((row + 1) * cols).min(this.rows.len())).map(|i| this.card(i, now, cx)).collect();
-                                div().flex().gap(u(GAP)).px(u(PAD)).pt(u(GAP)).children(cards)
+                                div().flex().gap(u(GAP)).px(u(PAD)).py(u(GAP / 2.)).children(cards)
                             })
                             .collect::<Vec<_>>()
                     }),
