@@ -726,7 +726,8 @@ impl Render for Reader {
 
         // In vertical mode the reading position is the page at the top.
         if self.mode == Mode::Vertical && len > 0 {
-            let top = self.strip.logical_scroll_top().item_ix.min(len - 1);
+            let at_end = self.strip.bounds_for_item(len).is_some_and(|b| b.bottom() <= self.strip.viewport_bounds().bottom() + px(1.));
+            let top = if at_end { len - 1 } else { self.strip.logical_scroll_top().item_ix.min(len - 1) };
             if top != self.page {
                 self.page = top;
                 self.sync(Some(window), cx);
