@@ -117,6 +117,7 @@ class CloudflareChallengeException(val url: String, val userAgent: String) :
 class CloudflareInterceptor : okhttp3.Interceptor {
     override fun intercept(chain: okhttp3.Interceptor.Chain): okhttp3.Response {
         val req = chain.request()
+        if (BrowserFetch.handles(req.url.host)) return BrowserFetch.fetch(req)
         val res = chain.proceed(req)
         if (res.code in setOf(403, 503) && res.header("Server").orEmpty().startsWith("cloudflare") &&
             (res.header("cf-mitigated") == "challenge" || res.header("Content-Type").orEmpty().startsWith("text/html"))

@@ -2,6 +2,7 @@ package yomi.host
 
 import android.app.Application
 import android.content.Context
+import eu.kanade.tachiyomi.network.BrowserFetch
 import eu.kanade.tachiyomi.network.CloudflareChallengeException
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.NetworkHelper
@@ -176,6 +177,11 @@ class Host {
             // A browser with this user agent passed the challenge, so use it for the site from now on.
             "setUserAgent" -> {
                 Injekt.get<NetworkHelper>().userAgents.set(str("url").toHttpUrl().host, str("userAgent"))
+                JsonPrimitive(true)
+            }
+            // The site refuses OkHttp even with the browser's cookies, so its requests go through a browser view.
+            "browserOnly" -> {
+                BrowserFetch.add(str("url").toHttpUrl().host)
                 JsonPrimitive(true)
             }
             "settings" -> settingsOf(source())
