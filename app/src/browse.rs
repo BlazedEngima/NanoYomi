@@ -364,6 +364,24 @@ impl Render for Browse {
                 )
         });
 
+        let empty = self.source.is_some() && !self.loading && !self.failed && self.page > 0 && self.mangas.is_empty();
+        let hint = if listing == Listing::Search && !self.query.is_empty() {
+            format!("No results for “{}”. Try fewer words.", self.query)
+        } else {
+            format!("{title} has nothing here right now. Try another listing or come back later.")
+        };
+        let placeholder = div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .pb(u(80.))
+            .child(div().text_size(u(48.)).text_color(rgb(MUTED)).child("( o_O )"))
+            .child(div().text_size(u(18.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child("The shelf is empty"))
+            .child(div().text_color(rgb(MUTED)).child(hint));
+
         div()
             .size_full()
             .relative()
@@ -413,7 +431,9 @@ impl Render for Browse {
                         }))),
                 )
             })
-            .child(
+            .child(if empty {
+                placeholder.into_any_element()
+            } else {
                 uniform_list(
                     "grid",
                     rows,
@@ -431,8 +451,9 @@ impl Render for Browse {
                             .collect::<Vec<_>>()
                     }),
                 )
-                .flex_1(),
-            )
+                .flex_1()
+                .into_any_element()
+            })
             .children(drawer)
     }
 }
