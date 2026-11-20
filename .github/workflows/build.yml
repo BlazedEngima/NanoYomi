@@ -1,18 +1,29 @@
-# Nano for every desktop platform and architecture, each with the extension host and a trimmed Java runtime.
+# Pushing a tag that starts with v builds Nano for every desktop platform and architecture, each with the extension
+# host and a trimmed Java runtime, and attaches the builds to that tag's GitHub release.
 # Hosted ARM runners are public-repo only, so ARM builds are cross-compiled on x64 (Windows, Linux) or Intel
 # builds on the ARM Mac.
 name: Build
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main]
     tags: ["v*"]
-    paths: ["app/**", "host/**", "packaging/**", ".github/workflows/build.yml"]
+
+permissions:
+  contents: write
 
 jobs:
+  # Made once up front, so the builds don't race to create it.
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+
   build:
     name: ${{ matrix.name }}
+    needs: release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -117,7 +128,7 @@ jobs:
       - name: macOS app and dmg
         if: runner.os == 'macOS'
         run: |
-          version=$(grep -m1 '^version' app/Cargo.toml | cut -d'"' -f2)
+          version="${GITHUB_REF_NAME#v}"
           c=dist/Nano.app/Contents
           mkdir -p "$c/MacOS" "$c/Resources" dist/Nano.iconset
           cp -R dist/nano/. "$c/MacOS/"
@@ -169,24 +180,9 @@ jobs:
           flatpak build-bundle --arch=$arch --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo repo "nano-${{ matrix.name }}.flatpak" app.nano.Reader
           ls -lh nano-${{ matrix.name }}.flatpak
 
-      # Each file goes up as-is (archive: false) so the .dmg, .flatpak and .tar.gz aren't wrapped in a zip.
-      - uses: actions/upload-artifact@v7
-        with:
-          path: nano-${{ matrix.name }}.zip
-          archive: false
-          if-no-files-found: ignore
-      - uses: actions/upload-artifact@v7
-        with:
-          path: nano-${{ matrix.name }}.tar.gz
-          archive: false
-          if-no-files-found: ignore
-      - uses: actions/upload-artifact@v7
-        with:
-          path: nano-${{ matrix.name }}.dmg
-          archive: false
-          if-no-files-found: ignore
-      - uses: actions/upload-artifact@v7
-        with:
-          path: nano-${{ matrix.name }}.flatpak
-          archive: false
-          if-no-files-found: ignore
+      # Each file goes up as-is, so the .dmg, .flatpak and .tar.gz aren't wrapped in a zip.
+      - name: Upload to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" nano-${{ matrix.name }}.* --clobber --repo "$GITHUB_REPOSITORY"
