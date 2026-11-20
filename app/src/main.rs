@@ -184,6 +184,7 @@ pub struct Source {
     pub name: String,
     /// Empty when the extension was removed.
     pub lang: String,
+    pub base_url: String,
     /// False for a saved series whose extension was removed.
     pub installed: bool,
 }
@@ -204,9 +205,15 @@ pub async fn call(host: &Arc<Host>, cx: &mut AsyncApp, op: &str, params: Value) 
     call_raw(host, cx, op, params).await.map_err(|e| readable(&e))
 }
 
+/// Shown when a site wants a sign-in or its own check. Browse offers to open the site on this text.
+pub const NEEDS_SITE: &str = "The site wants you signed in or checked first. Open it, finish there, then try again.";
+
 /// Host errors arrive as Java exceptions with a stack trace. Keep the message.
 fn readable(e: &str) -> String {
     let line = e.lines().next().unwrap_or("").trim();
+    if line.contains("HTTP error 401") || line.contains("Open in WebView") {
+        return NEEDS_SITE.into();
+    }
     if line.contains("HTTP error 429") {
         return "The site is limiting requests right now. Wait a minute, then try again.".into();
     }

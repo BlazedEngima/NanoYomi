@@ -46,12 +46,11 @@ pub fn solve(cx: &mut App, host: Arc<Host>, url: String, user_agent: String) -> 
     let opened = cx.open_window(options, |window, cx| {
         cx.new(|cx| {
             let viewport = window.viewport_size();
-            let webview = crate::webviews::builder()
-                .with_url(&url)
-                .with_user_agent(&user_agent)
-                .with_bounds(rect(viewport))
-                .build_as_child(window)
-                .expect("system webview unavailable");
+            let mut builder = crate::webviews::builder().with_url(&url).with_bounds(rect(viewport));
+            if !user_agent.is_empty() {
+                builder = builder.with_user_agent(&user_agent);
+            }
+            let webview = builder.build_as_child(window).expect("system webview unavailable");
             // Invisible but still drawn, so Cloudflare's script runs at full speed.
             crate::webviews::native::keep_running_hidden(&webview);
             crate::webviews::native::hide_window(&webview);
@@ -128,6 +127,44 @@ pub fn solve(cx: &mut App, host: Arc<Host>, url: String, user_agent: String) -> 
     // If the window never opened, `tx` was dropped, which reads as a cancel.
     let _ = opened;
     rx
+}
+
+/// Opens the site in a visible window to click through its own protection. The last cookies go to the host when it closes.
+pub fn browse(cx: &mut App, host: Arc<Host>, url: String, user_agent: String) {
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(900.), px(700.)), cx))),
+        titlebar: Some(TitlebarOptions { title: Some("Open the site, then close this window".into()), ..Default::default() }),
+        ..Default::default()
+    };
+    let _ = cx.open_window(options, |window, cx| {
+        cx.new(|cx| {
+            let viewport = window.viewport_size();
+            let webview = crate::webviews::builder()
+                .with_url(&url)
+                .with_user_agent(&user_agent)
+                .with_bounds(rect(viewport))
+                .build_as_child(window)
+                .expect("system webview unavailable");
+            cx.spawn_in(window, async move |this, cx| {
+                let mut last = Vec::new();
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    // This errors once the window is gone.
+                    match this.update(cx, |this: &mut Challenge, _| this.webview.cookies_for_url(&url)) {
+                        Ok(cookies) => last = cookies.unwrap_or_default(),
+                        Err(_) => break,
+                    }
+                }
+                let header_values = last.iter().map(|c| c.to_string()).collect();
+                let _ = host.set_cookies(&url, header_values).await;
+                if !user_agent.is_empty() {
+                    let _ = host.call("setUserAgent", serde_json::json!({ "url": url, "userAgent": user_agent })).await;
+                }
+            })
+            .detach();
+            Challenge { webview, shown_size: viewport }
+        })
+    });
 }
 
 impl Render for Challenge {

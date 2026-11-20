@@ -382,10 +382,17 @@ impl Render for Browse {
             .child(div().text_size(u(48.)).text_color(rgb(MUTED)).child("( x_x )"))
             .child(div().text_size(u(18.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child("The shelf won't open"))
             .child(div().max_w(u(560.)).text_color(rgb(crate::ACCENT_TEXT)).child(self.status.clone()))
-            .child(div().pt(u(12.)).child(segment("retry", "Try again", false).border_1().border_color(rgb(LINE)).on_click(cx.listener(|this, _, _, cx| {
+            .child(div().pt(u(12.)).flex().gap_2().child(segment("retry", "Try again", false).border_1().border_color(rgb(LINE)).on_click(cx.listener(|this, _, _, cx| {
                 this.failed = false;
                 this.load_next_page(cx);
-            }))));
+            })))
+            .when(self.status == crate::NEEDS_SITE && self.source.as_ref().is_some_and(|s| !s.base_url.is_empty()), |d| {
+                d.child(segment("open-site", "Open the site", false).border_1().border_color(rgb(LINE)).on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(s) = &this.source {
+                        crate::challenge::browse(cx, s.host.clone(), s.base_url.clone(), crate::challenge::browser_user_agent(String::new()));
+                    }
+                })))
+            }));
         let placeholder = div()
             .flex_1()
             .flex()
