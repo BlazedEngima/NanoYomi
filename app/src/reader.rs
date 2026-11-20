@@ -630,7 +630,8 @@ impl Reader {
             let has_prev = self.chapter + 1 < self.chapters.len();
             return div()
                 .w_full()
-                .py_12()
+                .pt_12()
+                .pb(crate::u(120.))
                 .flex()
                 .justify_center()
                 .gap(crate::u(12.))
