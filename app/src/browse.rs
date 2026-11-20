@@ -373,6 +373,7 @@ impl Render for Browse {
                 div()
                     .px(u(PAD))
                     .pt(u(28.))
+                    .pb(u(12.))
                     .flex()
                     .flex_wrap()
                     .items_end()
@@ -425,7 +426,7 @@ impl Render for Browse {
                                 let start = row * cols;
                                 let end = (start + cols).min(this.mangas.len());
                                 let cards: Vec<_> = (start..end).map(|i| this.card(i, cx)).collect();
-                                div().flex().gap(u(GAP)).px(u(PAD)).pt(u(GAP)).children(cards)
+                                div().flex().gap(u(GAP)).px(u(PAD)).py(u(GAP / 2.)).children(cards)
                             })
                             .collect::<Vec<_>>()
                     }),
