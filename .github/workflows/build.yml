@@ -124,7 +124,7 @@ jobs:
           cd dist
           if [ -n "$exe" ]; then 7z a -bso0 "../nano-${{ matrix.name }}.zip" nano; else tar -czf "../nano-${{ matrix.name }}.tar.gz" nano; fi
 
-      # A .app wraps the binary, host and runtime, and a .dmg holds the app. It isn't signed, so Gatekeeper asks on first launch.
+      # A .app wraps the binary, host and runtime, and a .dmg holds the app. It is ad-hoc signed, so Gatekeeper asks on first launch instead of calling it damaged.
       - name: macOS app and dmg
         if: runner.os == 'macOS'
         run: |
@@ -153,6 +153,7 @@ jobs:
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           EOF
+          codesign --force --deep -s - dist/Nano.app
           mkdir dist/dmg && cp -R dist/Nano.app dist/dmg/ && ln -s /Applications dist/dmg/Applications
           hdiutil create -volname Nano -srcfolder dist/dmg -ov -format UDZO "nano-${{ matrix.name }}.dmg"
 
