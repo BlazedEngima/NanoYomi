@@ -131,7 +131,10 @@ class Host {
             "search" -> source().let { src ->
                 val filters = src.getFilterList()
                 (req["filters"] as? JsonArray)?.let { filters.applyJson(it) }
-                src.getSearchManga(page(), req["query"]?.jsonPrimitive?.content ?: "", filters)
+                val query = req["query"]?.jsonPrimitive?.content ?: ""
+                val found = src.getSearchManga(page(), query, filters)
+                // Sites keep titles with a straight or a curly apostrophe, so try the other when nothing matches.
+                otherApostrophe(query)?.takeIf { page() == 1 && found.mangas.isEmpty() }?.let { src.getSearchManga(1, it, filters) } ?: found
             }.toJson()
             "update" -> {
                 val input = mangaFrom(req["manga"]!!.jsonObject)
@@ -292,4 +295,10 @@ private fun chapterFrom(o: JsonObject) = SChapter.create().apply {
     scanlator = o.s("scanlator")
     date_upload = o["dateUpload"]?.jsonPrimitive?.long ?: 0
     (o["memo"] as? JsonObject)?.let { memo = it }
+}
+
+internal fun otherApostrophe(query: String) = when {
+    '\'' in query -> query.replace('\'', '\u2019')
+    '\u2019' in query -> query.replace('\u2019', '\'')
+    else -> null
 }
