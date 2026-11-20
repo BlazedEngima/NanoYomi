@@ -21,6 +21,8 @@ const PAGE_PASSED_JS: &str = r#"(() => {
 const TIMEOUT: Duration = Duration::from_secs(120);
 /// Most checks pass on their own by now. After this the window shows so you can click.
 const SHOW_AFTER: Duration = Duration::from_secs(12);
+/// Quick checks pass before this, so the pill only shows for slower ones.
+const PILL_AFTER: Duration = Duration::from_secs(2);
 
 /// A check closes itself when passed, a sign-in waits for you to close it.
 enum Mode {
@@ -32,6 +34,8 @@ pub struct Check {
     webview: wry::WebView,
     title: &'static str,
     shown: bool,
+    waiting: bool,
+    site: String,
     root: WeakEntity<crate::Root>,
 }
 
@@ -80,6 +84,7 @@ impl Check {
         // Kept drawn off to the side so the page runs at full speed.
         crate::webviews::native::keep_running_hidden(&webview);
         let sign_in = matches!(mode, Mode::SignIn);
+        let site = url.split("//").nth(1).and_then(|r| r.split('/').next()).unwrap_or(&url).to_string();
         let close_root = root.clone();
 
         cx.spawn_in(window, async move |this, cx| {
@@ -109,6 +114,12 @@ impl Check {
             };
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
+                if !sign_in && !shown && started.elapsed() > PILL_AFTER {
+                    let _ = this.update(cx, |this: &mut Check, cx| {
+                        this.waiting = true;
+                        cx.notify();
+                    });
+                }
                 if !shown && started.elapsed() > SHOW_AFTER {
                     shown = true;
                     let _ = this.update(cx, |this: &mut Check, cx| {
@@ -176,7 +187,7 @@ impl Check {
         })
         .detach();
 
-        Check { webview, title, shown: sign_in, root }
+        Check { webview, title, shown: sign_in, waiting: false, site, root }
     }
 }
 
@@ -199,7 +210,33 @@ impl Render for Check {
         } else {
             // Off to the side at full size so the page lays out normally.
             let _ = self.webview.set_bounds(bounds(-10000., 0., w, h - head));
-            return div().into_any_element();
+            if !self.waiting {
+                return div().into_any_element();
+            }
+            return div()
+                .id("check-pill")
+                .occlude()
+                .absolute()
+                .bottom(u(24.))
+                .right(u(24.))
+                .h(u(40.))
+                .pl(u(16.))
+                .pr(u(5.))
+                .gap(u(12.))
+                .flex()
+                .items_center()
+                .rounded(u(20.))
+                .bg(rgb(crate::SURFACE))
+                .border_1()
+                .border_color(rgb(LINE))
+                .text_size(u(13.))
+                .text_color(rgb(crate::MUTED))
+                .child(format!("Checking {}…", self.site))
+                .child(small_button("check-show", "Show now", false).on_click(cx.listener(|this, _, _, cx| {
+                    this.shown = true;
+                    cx.notify();
+                })))
+                .into_any_element();
         }
         div()
             .id("check-scrim")
