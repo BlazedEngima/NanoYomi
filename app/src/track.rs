@@ -137,7 +137,7 @@ pub fn login_url(tracker: i64) -> Result<(String, String, String), String> {
             encode(&redirect(MAL))
         )
     } else {
-        format!("https://anilist.co/api/v2/oauth/authorize?client_id={ANILIST_CLIENT}&response_type=token&redirect_uri={}", encode(&redirect(ANILIST)))
+        format!("https://anilist.co/api/v2/oauth/authorize?client_id={ANILIST_CLIENT}&response_type=token")
     };
     Ok((url, state, verifier))
 }
