@@ -340,6 +340,8 @@ struct Root {
     migrate: Option<(Entity<migrate::Migrate>, Subscription)>,
     reader: Option<(Entity<Reader>, Subscription)>,
     palette: Option<palette::Palette>,
+    /// A site check or sign-in shown over the window.
+    check: Option<Entity<challenge::Check>>,
     /// The series panel that's sliding shut, kept until it's out of sight.
     closing: Option<Entity<MangaView>>,
     /// Bumped each time the panel opens or closes, or the sidebar folds, so their slides start over.
@@ -394,7 +396,7 @@ impl Root {
             let (store, registry, cache) = (store.clone(), registry.clone(), cache.clone());
             cx.new(|cx| History::new(store, registry, cache, cx))
         });
-        Root { cache, store, registry, tab, library, browse, global, catalog, history, settings, manga: None, migrate: None, reader: None, palette: None, closing: None, panel_moves: 0, sidebar_moves: 0, focus, _subs: subs }
+        Root { cache, store, registry, tab, library, browse, global, catalog, history, settings, manga: None, migrate: None, reader: None, palette: None, check: None, closing: None, panel_moves: 0, sidebar_moves: 0, focus, _subs: subs }
     }
 
     fn zoom_by(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -524,7 +526,7 @@ impl Render for Root {
         window.set_rem_size(u(16.));
         let root = div().relative().size_full().flex().bg(rgb(BG)).text_color(rgb(TEXT)).font_family(SANS).text_size(u(14.));
         if let Some((reader, _)) = &self.reader {
-            return root.child(reader.clone());
+            return root.child(reader.clone()).children(self.check.clone());
         }
         let screen: AnyElement = match self.tab {
             _ if self.migrate.is_some() => self.migrate.as_ref().unwrap().0.clone().into_any_element(),
@@ -580,6 +582,7 @@ impl Render for Root {
             .child(div().flex_1().min_w_0().h_full().child(screen))
             .children(panel)
             .children(self.palette(cx))
+            .children(self.check.clone())
     }
 }
 

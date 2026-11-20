@@ -1,10 +1,12 @@
-//! Cloudflare checks: pass them in a hidden system web view, then hand its cookies to the extension host.
+//! Site checks and sign-ins in a web view inside the main window, with its cookies handed to the extension host.
 
+use crate::catalog::small_button;
 use crate::host::Host;
+use crate::{LINE, RULE, TEXT, u};
 use futures::channel::oneshot;
 use gpui::{
-    App, AppContext, Bounds, Context, IntoElement, Pixels, Render, Size, Styled, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, div, px, size,
+    App, AppContext, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels, Render, Size,
+    StatefulInteractiveElement, Styled, WeakEntity, Window, WindowHandle, div, px, rgb,
 };
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -20,9 +22,17 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 /// Most checks pass on their own by now. After this the window shows so you can click.
 const SHOW_AFTER: Duration = Duration::from_secs(12);
 
-struct Challenge {
+/// A check closes itself when passed, a sign-in waits for you to close it.
+enum Mode {
+    Check(oneshot::Sender<bool>),
+    SignIn,
+}
+
+pub struct Check {
     webview: wry::WebView,
-    shown_size: Size<Pixels>,
+    title: &'static str,
+    shown: bool,
+    root: WeakEntity<crate::Root>,
 }
 
 /// WebKit has to say it's Safari, or Cloudflare rejects the tick. WebView2 can use the extension's own agent.
@@ -34,153 +44,212 @@ pub fn browser_user_agent(extension_agent: String) -> String {
     }
 }
 
-/// Resolves true once the clearance cookie reaches the host. Errors if the user closes the window.
+fn main_window(cx: &App) -> Option<WindowHandle<crate::Root>> {
+    cx.windows().into_iter().find_map(|w| w.downcast::<crate::Root>())
+}
+
+/// Resolves true once the clearance cookie reaches the host. Errors if the user closes the panel.
 pub fn solve(cx: &mut App, host: Arc<Host>, url: String, user_agent: String) -> oneshot::Receiver<bool> {
     let (tx, rx) = oneshot::channel();
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(480.), px(680.)), cx))),
-        titlebar: Some(TitlebarOptions { title: Some("Verify to continue".into()), ..Default::default() }),
-        focus: false,
-        ..Default::default()
-    };
-    let opened = cx.open_window(options, |window, cx| {
-        cx.new(|cx| {
-            let viewport = window.viewport_size();
-            let mut builder = crate::webviews::builder().with_url(&url).with_bounds(rect(viewport));
-            if !user_agent.is_empty() {
-                builder = builder.with_user_agent(&user_agent);
-            }
-            let webview = builder.build_as_child(window).expect("system webview unavailable");
-            // Invisible but still drawn, so Cloudflare's script runs at full speed.
-            crate::webviews::native::keep_running_hidden(&webview);
-            crate::webviews::native::hide_window(&webview);
-
-            cx.spawn_in(window, async move |this, cx| {
-                // A stale clearance would look like an instant solve, so clear it and reload.
-                let mut stale: Option<Vec<String>> = None;
-                let started = std::time::Instant::now();
-                // Two passing checks in a row count as solved.
-                let passed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let mut clear_ticks = 0;
-                let mut shown = false;
-                loop {
-                    cx.background_executor().timer(Duration::from_secs(1)).await;
-                    if !shown && started.elapsed() > SHOW_AFTER {
-                        shown = true;
-                        let _ = this.update_in(cx, |this: &mut Challenge, window, cx| {
-                            crate::webviews::native::show_window(&this.webview);
-                            window.activate_window();
-                            cx.activate(true);
-                        });
-                    }
-                    // Give up eventually, or every queued page waits behind it.
-                    if started.elapsed() > TIMEOUT {
-                        let _ = this.update_in(cx, |_, window, _| window.remove_window());
-                        return;
-                    }
-                    // This errors once the window is gone, which means the user gave up.
-                    let Ok(cookies) = this.update(cx, |this: &mut Challenge, _| this.webview.cookies_for_url(&url)) else {
-                        return;
-                    };
-                    let cookies = cookies.unwrap_or_default();
-                    let old = cookies.iter().filter(|c| c.name() == "cf_clearance").map(|c| c.value().to_string()).collect::<Vec<_>>();
-                    let Some(stale) = &stale else {
-                        if !old.is_empty() {
-                            let _ = this.update(cx, |this: &mut Challenge, _| {
-                                for c in cookies.iter().filter(|c| c.name() == "cf_clearance") {
-                                    let _ = this.webview.delete_cookie(c);
-                                }
-                                let _ = this.webview.load_url(&url);
-                            });
-                        }
-                        stale = Some(old);
-                        continue;
-                    };
-                    // Solved when a new clearance shows up, or the page stops being a challenge.
-                    clear_ticks = if passed.swap(false, Ordering::Relaxed) { clear_ticks + 1 } else { 0 };
-                    let p = passed.clone();
-                    let _ = this.update(cx, |this: &mut Challenge, _| {
-                        this.webview.evaluate_script_with_callback(PAGE_PASSED_JS, move |r| {
-                            if r == "true" {
-                                p.store(true, Ordering::Relaxed);
-                            }
-                        })
-                    });
-                    if !old.iter().any(|v| !stale.contains(v)) && clear_ticks < 2 {
-                        continue;
-                    }
-                    // The full Set-Cookie form, which the host parses.
-                    let header_values = cookies.iter().map(|c| c.to_string()).collect();
-                    let ok = host.set_cookies(&url, header_values).await.is_ok()
-                        // The webview passed with this agent, so the host keeps using it for the site.
-                        && host.call("setUserAgent", serde_json::json!({ "url": url, "userAgent": user_agent })).await.is_ok();
-                    let _ = tx.send(ok);
-                    let _ = this.update_in(cx, |_, window, _| window.remove_window());
-                    return;
-                }
-            })
-            .detach();
-
-            Challenge { webview, shown_size: viewport }
-        })
-    });
-    // If the window never opened, `tx` was dropped, which reads as a cancel.
-    let _ = opened;
+    open(cx, host, url, user_agent, "Verify to continue", Mode::Check(tx));
     rx
 }
 
-/// Opens the site in a visible window to click through its own protection. The last cookies go to the host when it closes.
+/// Opens the site to sign in. Its cookies go to the host when the panel closes.
 pub fn browse(cx: &mut App, host: Arc<Host>, url: String, user_agent: String) {
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(900.), px(700.)), cx))),
-        titlebar: Some(TitlebarOptions { title: Some("Open the site, then close this window".into()), ..Default::default() }),
-        ..Default::default()
-    };
-    let _ = cx.open_window(options, |window, cx| {
-        cx.new(|cx| {
-            let viewport = window.viewport_size();
-            let webview = crate::webviews::builder()
-                .with_url(&url)
-                .with_user_agent(&user_agent)
-                .with_bounds(rect(viewport))
-                .build_as_child(window)
-                .expect("system webview unavailable");
-            cx.spawn_in(window, async move |this, cx| {
-                let mut last = Vec::new();
-                loop {
-                    cx.background_executor().timer(Duration::from_secs(1)).await;
-                    // This errors once the window is gone.
-                    match this.update(cx, |this: &mut Challenge, _| this.webview.cookies_for_url(&url)) {
-                        Ok(cookies) => last = cookies.unwrap_or_default(),
-                        Err(_) => break,
-                    }
-                }
-                let header_values = last.iter().map(|c| c.to_string()).collect();
-                let _ = host.set_cookies(&url, header_values).await;
-                if !user_agent.is_empty() {
-                    let _ = host.call("setUserAgent", serde_json::json!({ "url": url, "userAgent": user_agent })).await;
-                }
-            })
-            .detach();
-            Challenge { webview, shown_size: viewport }
-        })
+    open(cx, host, url, user_agent, "Sign in, then close this", Mode::SignIn);
+}
+
+fn open(cx: &mut App, host: Arc<Host>, url: String, user_agent: String, title: &'static str, mode: Mode) {
+    let Some(main) = main_window(cx) else { return };
+    let _ = main.update(cx, |root, window, cx| {
+        let root_weak = cx.weak_entity();
+        root.check = Some(cx.new(|cx| Check::new(host, url, user_agent, title, mode, root_weak, window, cx)));
+        cx.notify();
     });
 }
 
-impl Render for Challenge {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let viewport = window.viewport_size();
-        if viewport != self.shown_size {
-            let _ = self.webview.set_bounds(rect(viewport));
-            self.shown_size = viewport;
+impl Check {
+    #[allow(clippy::too_many_arguments)]
+    fn new(host: Arc<Host>, url: String, user_agent: String, title: &'static str, mode: Mode, root: WeakEntity<crate::Root>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut builder = crate::webviews::builder().with_url(&url).with_bounds(rect(window.viewport_size()));
+        if !user_agent.is_empty() {
+            builder = builder.with_user_agent(&user_agent);
         }
-        div().size_full()
+        let webview = builder.build_as_child(window).expect("system webview unavailable");
+        // Kept drawn off to the side so the page runs at full speed.
+        crate::webviews::native::keep_running_hidden(&webview);
+        let sign_in = matches!(mode, Mode::SignIn);
+        let close_root = root.clone();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let mut tx = match mode {
+                Mode::Check(tx) => Some(tx),
+                Mode::SignIn => None,
+            };
+            // A stale clearance would look like an instant solve, so clear it and reload.
+            let mut stale: Option<Vec<String>> = None;
+            let started = std::time::Instant::now();
+            // Two passing checks in a row count as solved.
+            let passed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mut clear_ticks = 0;
+            let mut shown = sign_in;
+            let mut last = Vec::new();
+            if sign_in {
+                let _ = this.update(cx, |this: &mut Check, cx| {
+                    this.shown = true;
+                    cx.notify();
+                });
+            }
+            let finish = |cx: &mut gpui::AsyncWindowContext| {
+                let _ = close_root.update(cx, |r: &mut crate::Root, cx| {
+                    r.check = None;
+                    cx.notify();
+                });
+            };
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                if !shown && started.elapsed() > SHOW_AFTER {
+                    shown = true;
+                    let _ = this.update(cx, |this: &mut Check, cx| {
+                        this.shown = true;
+                        cx.notify();
+                    });
+                }
+                // Give up eventually, or every queued page waits behind it.
+                if !sign_in && started.elapsed() > TIMEOUT {
+                    finish(cx);
+                    return;
+                }
+                // This errors once the panel is gone, which means the user closed it.
+                let Ok(cookies) = this.update(cx, |this: &mut Check, _| this.webview.cookies_for_url(&url)) else {
+                    break;
+                };
+                let cookies = cookies.unwrap_or_default();
+                if sign_in {
+                    last = cookies;
+                    continue;
+                }
+                let old = cookies.iter().filter(|c| c.name() == "cf_clearance").map(|c| c.value().to_string()).collect::<Vec<_>>();
+                let Some(stale) = &stale else {
+                    if !old.is_empty() {
+                        let _ = this.update(cx, |this: &mut Check, _| {
+                            for c in cookies.iter().filter(|c| c.name() == "cf_clearance") {
+                                let _ = this.webview.delete_cookie(c);
+                            }
+                            let _ = this.webview.load_url(&url);
+                        });
+                    }
+                    stale = Some(old);
+                    continue;
+                };
+                // Solved when a new clearance shows up, or the page stops being a challenge.
+                clear_ticks = if passed.swap(false, Ordering::Relaxed) { clear_ticks + 1 } else { 0 };
+                let p = passed.clone();
+                let _ = this.update(cx, |this: &mut Check, _| {
+                    this.webview.evaluate_script_with_callback(PAGE_PASSED_JS, move |r| {
+                        if r == "true" {
+                            p.store(true, Ordering::Relaxed);
+                        }
+                    })
+                });
+                if !old.iter().any(|v| !stale.contains(v)) && clear_ticks < 2 {
+                    continue;
+                }
+                // The full Set-Cookie form, which the host parses.
+                let header_values = cookies.iter().map(|c| c.to_string()).collect();
+                let ok = host.set_cookies(&url, header_values).await.is_ok()
+                    // The webview passed with this agent, so the host keeps using it for the site.
+                    && host.call("setUserAgent", serde_json::json!({ "url": url, "userAgent": user_agent })).await.is_ok();
+                if let Some(tx) = tx.take() {
+                    let _ = tx.send(ok);
+                }
+                finish(cx);
+                return;
+            }
+            // Closing the panel ends a sign-in, so hand over its cookies.
+            let header_values = last.iter().map(|c| c.to_string()).collect();
+            let _ = host.set_cookies(&url, header_values).await;
+            if !user_agent.is_empty() {
+                let _ = host.call("setUserAgent", serde_json::json!({ "url": url, "userAgent": user_agent })).await;
+            }
+        })
+        .detach();
+
+        Check { webview, title, shown: sign_in, root }
+    }
+}
+
+/// The panel's rectangle, centred.
+fn panel(viewport: Size<Pixels>) -> (f32, f32, f32, f32) {
+    let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
+    let w = f32::from(u(600.)).min(vw - f32::from(u(48.)));
+    let h = f32::from(u(780.)).min(vh - f32::from(u(48.)));
+    ((vw - w) / 2., (vh - h) / 2., w, h)
+}
+
+impl Render for Check {
+    #[allow(refining_impl_trait)]
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let viewport = window.viewport_size();
+        let (x, y, w, h) = panel(viewport);
+        let head = f32::from(u(56.));
+        if self.shown {
+            let _ = self.webview.set_bounds(bounds(x, y + head, w, h - head));
+        } else {
+            // Off to the side at full size so the page lays out normally.
+            let _ = self.webview.set_bounds(bounds(-10000., 0., w, h - head));
+            return div().into_any_element();
+        }
+        div()
+            .id("check-scrim")
+            .occlude()
+            .absolute()
+            .inset_0()
+            .bg(gpui::rgba(0x0000008C))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .w(px(w))
+                    .h(px(h))
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(crate::SURFACE))
+                    .border_1()
+                    .border_color(rgb(LINE))
+                    .rounded(u(12.))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .h(px(head))
+                            .flex_none()
+                            .px(u(20.))
+                            .flex()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(rgb(RULE))
+                            .child(div().flex_1().min_w_0().truncate().text_size(u(16.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(self.title))
+                            .child(small_button("check-close", "Close", false).on_click(cx.listener(|this, _, _, cx| {
+                                let _ = this.root.update(cx, |r, cx| {
+                                    r.check = None;
+                                    cx.notify();
+                                });
+                            }))),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+fn bounds(x: f32, y: f32, w: f32, h: f32) -> wry::Rect {
+    wry::Rect {
+        position: wry::dpi::LogicalPosition::new(f64::from(x), f64::from(y)).into(),
+        size: wry::dpi::LogicalSize::new(f64::from(w), f64::from(h)).into(),
     }
 }
 
 fn rect(s: Size<Pixels>) -> wry::Rect {
-    wry::Rect {
-        position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
-        size: wry::dpi::LogicalSize::new(f64::from(f32::from(s.width)), f64::from(f32::from(s.height))).into(),
-    }
+    bounds(0., 0., f32::from(s.width), f32::from(s.height))
 }
