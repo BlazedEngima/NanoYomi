@@ -370,6 +370,22 @@ impl Render for Browse {
         } else {
             format!("{title} has nothing here right now. Try another listing or come back later.")
         };
+        let broken = self.failed && self.mangas.is_empty();
+        let failed_view = div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .pb(u(80.))
+            .child(div().text_size(u(48.)).text_color(rgb(MUTED)).child("( x_x )"))
+            .child(div().text_size(u(18.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child("The shelf won't open"))
+            .child(div().max_w(u(560.)).text_color(rgb(crate::ACCENT_TEXT)).child(self.status.clone()))
+            .child(div().pt(u(12.)).child(segment("retry", "Try again", false).border_1().border_color(rgb(LINE)).on_click(cx.listener(|this, _, _, cx| {
+                this.failed = false;
+                this.load_next_page(cx);
+            }))));
         let placeholder = div()
             .flex_1()
             .flex()
@@ -416,7 +432,7 @@ impl Render for Browse {
                     }))
                     .child(div().w(u(300.)).max_w_full().child(self.search.clone())),
             )
-            .when(self.failed, |d| {
+            .when(self.failed && !broken, |d| {
                 d.child(
                     div()
                         .px(u(PAD))
@@ -431,7 +447,9 @@ impl Render for Browse {
                         }))),
                 )
             })
-            .child(if empty {
+            .child(if broken {
+                failed_view.into_any_element()
+            } else if empty {
                 placeholder.into_any_element()
             } else {
                 uniform_list(
