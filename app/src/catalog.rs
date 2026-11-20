@@ -6,6 +6,7 @@ use crate::extensions::{self, Ext};
 use crate::images::ImageCache;
 use crate::input::{InputEvent, TextInput};
 use crate::registry::Registry;
+use crate::segmented::Segmented;
 use crate::store::Store;
 use crate::{ACCENT_TEXT, BG, FAINT, HOVER, LINE, MONO, MUTED, RULE, SURFACE, TEXT, heading};
 use gpui::{
@@ -21,7 +22,6 @@ const CARD_MIN: f32 = 300.;
 
 #[derive(Clone, Copy)]
 enum Item {
-    Repos,
     Label(&'static str),
     Installed(usize),
     Row(usize),
@@ -35,6 +35,7 @@ pub struct Catalog {
     search: Entity<TextInput>,
     repo_input: Entity<TextInput>,
     adding: bool,
+    tabs: Segmented,
     repo_error: Option<String>,
     icons: Covers,
     list: ListState,
@@ -75,6 +76,7 @@ impl Catalog {
             search,
             repo_input,
             adding: false,
+            tabs: Segmented::new(&["Extensions", "Repos"], 0),
             repo_error: None,
             icons: Covers::default(),
             zoom_seen: 0.,
@@ -160,11 +162,8 @@ impl Catalog {
             .pt(u(24.))
             .flex()
             .flex_col()
-            .child(div().pb(u(6.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("REPOS"))
-            .children(rows)
             .child(
                 div()
-                    .pt(u(12.))
                     .flex()
                     .items_center()
                     .gap_3()
@@ -178,6 +177,7 @@ impl Catalog {
             .child(div().pt(u(8.)).text_size(u(13.)).text_color(rgb(if self.repo_error.is_some() { ACCENT_TEXT } else { FAINT })).child(
                 self.repo_error.clone().unwrap_or_else(|| "The same repo addresses Mihon uses. Nano only installs extensions signed with the key a repo had when you added it.".into()),
             ))
+            .child(div().mt(u(20.)).flex().flex_col().border_t_1().border_color(rgb(RULE)).children(rows))
             .into_any_element()
     }
 
@@ -191,7 +191,9 @@ impl Catalog {
         if sources.is_empty() {
             return;
         }
-        let view = cx.new(|cx| crate::ext_settings::ExtSettings::new(sources, cx));
+        let store = self.store.clone();
+        let (pkg, shown) = (pkg.to_string(), enabled);
+        let view = cx.new(|cx| crate::ext_settings::ExtSettings::new(sources, shown, pkg, store, cx));
         let sub = cx.subscribe(&view, |this, _, _: &crate::ext_settings::Close, cx| {
             this.settings = None;
             cx.notify();
@@ -226,31 +228,10 @@ impl Catalog {
         let icon = self.icon(&e, 44., cx);
         let registry = self.registry.read(cx);
         let langs = registry.languages(&e.pkg);
-        let enabled = registry.enabled_languages(&e.pkg, self.store.read(cx));
         let multi = langs.len() > 1;
         // Drop the stack trace the host adds.
         let error = registry.errors.get(&e.pkg).map(|err| format!("Couldn't load: {}", err.lines().next().unwrap_or(err)));
         let pkg = e.pkg.clone();
-        let chips: Vec<_> = langs
-            .into_iter()
-            .map(|l| {
-                let on = enabled.contains(&l);
-                let (pkg, lang, enabled) = (pkg.clone(), l.clone(), enabled.clone());
-                chip(SharedString::from(format!("lang-{pkg}-{l}")), l, on).on_click(cx.listener(move |this, _, _, cx| {
-                    let mut langs = enabled.clone();
-                    if langs.contains(&lang) {
-                        langs.retain(|x| *x != lang);
-                    } else {
-                        langs.push(lang.clone());
-                    }
-                    // Keep at least one language or the extension disappears from Browse.
-                    if !langs.is_empty() {
-                        let pkg = pkg.clone();
-                        this.store.update(cx, |s, cx| s.set_languages(&pkg, langs, cx));
-                    }
-                }))
-            })
-            .collect();
         let have = registry.versions.get(&e.pkg).cloned().unwrap_or_else(|| e.version.clone());
         let update = (!e.key.is_empty() && have != e.version).then(|| {
             let id = SharedString::from(format!("up-{}", e.pkg));
@@ -301,10 +282,9 @@ impl Catalog {
                                             .font_family(MONO)
                                             .text_size(u(12.))
                                             .text_color(rgb(FAINT))
-                                            .child(if multi { format!("v{have} · languages shown in Browse:") } else { format!("{} · v{have}", e.langs.join(" ")) }),
+                                            .child(if multi { format!("v{have}") } else { format!("{} · v{have}", e.langs.join(" ")) }),
                                     ),
                             )
-                            .when(multi, |d| d.child(div().flex().flex_wrap().gap(u(6.)).children(chips)))
                             .children(error.map(|err| div().text_size(u(13.)).text_color(rgb(ACCENT_TEXT)).child(err))),
                     )
                     .children(update)
@@ -375,7 +355,6 @@ impl Catalog {
                 let text = if text == "AVAILABLE" { format!("AVAILABLE · {}", self.available.len()) } else { text.to_string() };
                 div().px(u(PAD)).pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child(text).into_any_element()
             }
-            Some(Item::Repos) => self.repos(cx),
             Some(Item::Installed(i)) => self.installed_row(i, cx),
             Some(Item::Row(r)) => {
                 let cards: Vec<AnyElement> =
@@ -384,7 +363,7 @@ impl Catalog {
             }
             Some(Item::Empty) => {
                 let text = if self.store.read(cx).repos().is_empty() {
-                    "Add a repo above to see its extensions. Nano doesn't come with one."
+                    "Add a repo in the Repos tab to see its extensions. Nano doesn't come with one."
                 } else {
                     "No extensions match."
                 };
@@ -473,7 +452,7 @@ impl Render for Catalog {
             n => format!("{} installed · {} in {n} repos", self.installed.len(), index.len()),
         };
 
-        let mut items = vec![Item::Repos];
+        let mut items = vec![];
         if !self.installed.is_empty() {
             items.push(Item::Label("INSTALLED"));
             items.extend((0..self.installed.len()).map(Item::Installed));
@@ -486,10 +465,50 @@ impl Render for Catalog {
         if items.len() != self.list.item_count() {
             self.list.reset(items.len());
         }
-        // The repos block grows with errors and new repos without changing the count.
-        self.list.remeasure_items(0..1);
         self.items = items;
         let this = cx.entity();
+        let on_repos = self.tabs.selected == 1;
+
+        let body = if on_repos {
+            div().id("repos-scroll").flex_1().min_h_0().overflow_y_scroll().child(self.repos(cx)).into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .px(u(PAD))
+                        .pt(u(16.))
+                        .flex()
+                        .flex_wrap()
+                        .gap(u(6.))
+                        .child(chip("lang-any", "all languages", lang.is_none()).on_click(cx.listener(|this, _, _, cx| {
+                            this.lang = None;
+                            cx.notify();
+                        })))
+                        .children(top.into_iter().map(|l| {
+                            let on = lang.as_deref() == Some(l.as_str());
+                            chip(SharedString::from(format!("filter-{l}")), l.clone(), on).on_click(cx.listener(move |this, _, _, cx| {
+                                this.lang = if on { None } else { Some(l.clone()) };
+                                cx.notify();
+                            }))
+                        }))
+                        .child(div().w(u(12.)))
+                        .child(chip("nsfw", "show 18+", nsfw).on_click(cx.listener(|this, _, _, cx| {
+                            this.nsfw = !this.nsfw;
+                            cx.notify();
+                        }))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(list(self.list.clone(), move |ix, _, cx| this.update(cx, |this, cx| this.item(ix, cx))).size_full()),
+                )
+                .into_any_element()
+        };
 
         div()
             .size_full()
@@ -504,38 +523,13 @@ impl Render for Catalog {
                     .items_end()
                     .gap_4()
                     .child(div().flex_1().child(heading("Extensions", note)))
-                    .child(div().w(u(320.)).child(self.search.clone())),
-            )
-            .child(
-                div()
-                    .px(u(PAD))
-                    .pt(u(16.))
-                    .flex()
-                    .flex_wrap()
-                    .gap(u(6.))
-                    .child(chip("lang-any", "all languages", lang.is_none()).on_click(cx.listener(|this, _, _, cx| {
-                        this.lang = None;
-                        cx.notify();
-                    })))
-                    .children(top.into_iter().map(|l| {
-                        let on = lang.as_deref() == Some(l.as_str());
-                        chip(SharedString::from(format!("filter-{l}")), l.clone(), on).on_click(cx.listener(move |this, _, _, cx| {
-                            this.lang = if on { None } else { Some(l.clone()) };
-                            cx.notify();
-                        }))
-                    }))
-                    .child(div().w(u(12.)))
-                    .child(chip("nsfw", "show 18+", nsfw).on_click(cx.listener(|this, _, _, cx| {
-                        this.nsfw = !this.nsfw;
+                    .when(!on_repos, |d| d.child(div().w(u(320.)).child(self.search.clone())))
+                    .child(self.tabs.render("catalog-tabs", cx.listener(|this, i: &usize, _, cx| {
+                        this.tabs.pick(*i);
                         cx.notify();
                     }))),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(list(self.list.clone(), move |ix, _, cx| this.update(cx, |this, cx| this.item(ix, cx))).size_full()),
-            )
+            .child(body)
             .children(self.settings.as_ref().map(|(v, _)| v.clone()))
     }
 }

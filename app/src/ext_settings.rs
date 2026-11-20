@@ -3,6 +3,7 @@
 
 use crate::catalog::{chip, small_button};
 use crate::input::{InputEvent, TextInput};
+use crate::store::Store;
 use crate::{ACCENT_TEXT, FAINT, LINE, MUTED, RULE, SURFACE, Source, TEXT, u};
 use gpui::{
     AnyElement, AppContext, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement, ParentElement,
@@ -17,6 +18,9 @@ pub struct ExtSettings {
     /// One per language the extension offers. Each keeps its own settings.
     sources: Vec<Source>,
     picked: usize,
+    store: Entity<Store>,
+    pkg: String,
+    shown: Vec<String>,
     prefs: Vec<Value>,
     status: SharedString,
     texts: HashMap<String, Entity<TextInput>>,
@@ -26,8 +30,8 @@ pub struct ExtSettings {
 impl EventEmitter<Close> for ExtSettings {}
 
 impl ExtSettings {
-    pub fn new(sources: Vec<Source>, cx: &mut Context<Self>) -> Self {
-        let mut this = ExtSettings { sources, picked: 0, prefs: vec![], status: "Loading…".into(), texts: HashMap::new(), _subs: vec![] };
+    pub fn new(sources: Vec<Source>, shown: Vec<String>, pkg: String, store: Entity<Store>, cx: &mut Context<Self>) -> Self {
+        let mut this = ExtSettings { sources, picked: 0, store, pkg, shown, prefs: vec![], status: "Loading…".into(), texts: HashMap::new(), _subs: vec![] };
         this.load(cx);
         this
     }
@@ -204,6 +208,31 @@ impl Render for ExtSettings {
                 }))
             }))
         });
+        let in_browse = (self.sources.len() > 1).then(|| {
+            let lang = self.source().lang;
+            let on = self.shown.contains(&lang);
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .pb(u(8.))
+                .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(format!("Show {lang} in Browse")))
+                .child(chip("in-browse", if on { "on" } else { "off" }, on).on_click(cx.listener(move |this, _, _, cx| {
+                    let mut langs = this.shown.clone();
+                    if on {
+                        langs.retain(|x| *x != lang);
+                    } else {
+                        langs.push(lang.clone());
+                    }
+                    // Keep at least one language or the extension disappears from Browse.
+                    if !langs.is_empty() {
+                        this.shown = langs.clone();
+                        let pkg = this.pkg.clone();
+                        this.store.update(cx, |s, cx| s.set_languages(&pkg, langs, cx));
+                        cx.notify();
+                    }
+                })))
+        });
         div()
             .id("ext-settings")
             .occlude()
@@ -236,6 +265,7 @@ impl Render for ExtSettings {
                     .px(u(24.))
                     .pb(u(24.))
                     .children(languages)
+                    .children(in_browse)
                     .when(!self.status.is_empty(), |d| d.child(div().py(u(10.)).text_size(u(13.)).text_color(rgb(ACCENT_TEXT)).child(self.status.clone())))
                     .children(rows),
             )
