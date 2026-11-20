@@ -3,12 +3,14 @@ package android.util;
 /** Logs go to stderr because stdout carries the protocol. Set NANO_HOST_DEBUG to see info and debug lines. */
 public final class Log {
     public static final int VERBOSE = 2, DEBUG = 3, INFO = 4, WARN = 5, ERROR = 6, ASSERT = 7;
+    public static final String RULE = "─".repeat(60);
     private static final boolean DEBUG_ON = System.getenv("NANO_HOST_DEBUG") != null;
 
     public static int println(int priority, String tag, String msg) {
         if (priority < WARN && !DEBUG_ON) return 0;
         String level = switch (priority) { case VERBOSE -> "V"; case DEBUG -> "D"; case INFO -> "I"; case WARN -> "W"; case ERROR -> "E"; default -> "A"; };
         System.err.println(level + "/" + tag + ": " + msg);
+        if (priority >= ERROR) System.err.println(RULE);
         return 0;
     }
     private static int log(int priority, String tag, String msg, Throwable tr) {

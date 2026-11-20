@@ -92,6 +92,7 @@ fun main(args: Array<String>) {
                             // Wrappers like ExceptionInInitializerError hide the real reason, so report the whole chain.
                             put("error", generateSequence(e) { it.cause }.joinToString(" <- ") { "${it::class.java.name}: ${it.message}" })
                             e.printStackTrace()
+                            System.err.println(android.util.Log.RULE)
                             // Extensions may wrap it, so look through the cause chain.
                             generateSequence(e) { it.cause }.filterIsInstance<CloudflareChallengeException>().firstOrNull()?.let {
                                 put("challenge", buildJsonObject { put("url", it.url); put("userAgent", it.userAgent) })

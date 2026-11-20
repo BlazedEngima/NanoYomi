@@ -81,7 +81,7 @@ public final class Looper {
                 }
             }
             try { next.r.run(); }
-            catch (Throwable e) { System.err.println("Uncaught on looper " + me.thread.getName() + ": " + e); e.printStackTrace(); }
+            catch (Throwable e) { System.err.println("Uncaught on looper " + me.thread.getName() + ": " + e); e.printStackTrace(); System.err.println(android.util.Log.RULE); }
         }
     }
 
