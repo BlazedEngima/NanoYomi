@@ -15,6 +15,7 @@ pub struct Config {
     pub key: String,
     pub device_id: String,
     pub cursor: i64,
+    pub v1_etag: String,
 }
 
 /// Nano's view of a series as last synced.
@@ -56,8 +57,16 @@ pub fn unsent(s: &Series) -> bool {
 }
 
 fn dirty(s: &Series) -> bool {
+    dirty_in(s, &s.sync)
+}
+
+fn dirty1(s: &Series) -> bool {
+    dirty_in(s, &s.sync1)
+}
+
+fn dirty_in(s: &Series, meta: &Option<Meta>) -> bool {
     !s.url().is_empty()
-        && match &s.sync {
+        && match meta {
             Some(m) => m.sent != Snapshot::of(s),
             None => s.in_library || s.progress.is_some() || !s.marks.is_empty() || !s.bookmarks.is_empty() || !s.tracks.is_empty(),
         }
@@ -354,8 +363,12 @@ fn new_chapter(c: &Value, order: usize) -> Msg {
 
 /// The series to send, and the server's copy as it will be after.
 fn outgoing(s: &Series, raw: Option<Raw>, now: i64) -> (Msg, Raw) {
+    outgoing_since(s, s.sync.as_ref().map(|m| &m.sent), raw, now)
+}
+
+/// `old` is what the server file last had.
+fn outgoing_since(s: &Series, old: Option<&Snapshot>, raw: Option<Raw>, now: i64) -> (Msg, Raw) {
     let secs = now / 1000;
-    let old = s.sync.as_ref().map(|m| &m.sent);
     let mut raw = raw.unwrap_or_else(|| Raw { manga: new_manga(s), chapters: HashMap::new() });
     if old.is_none_or(|o| o.in_library != s.in_library) {
         let m = &mut raw.manga;
@@ -483,6 +496,11 @@ fn track_of(e: &Msg) -> Track {
 /// Takes a server series into Nano. The newer reading position wins.
 /// Sync leaves series that are only in history on the server; a restore brings them in with `history`.
 fn incoming(series: &mut Vec<Series>, m: &Msg, raw: Option<Raw>, source_names: &HashMap<String, String>, history: bool) -> Option<(usize, Raw)> {
+    incoming_from(series, m, raw, source_names, history, false)
+}
+
+/// `v1` skips categories and trackers, which only the new protocol carries.
+fn incoming_from(series: &mut Vec<Series>, m: &Msg, raw: Option<Raw>, source_names: &HashMap<String, String>, history: bool, v1: bool) -> Option<(usize, Raw)> {
     let source = (m.int(M_SOURCE) as u64).to_string();
     let url = m.str(M_URL);
     let favorite = m.bool(M_FAVORITE).unwrap_or(true); // absent is true in Mihon's encoding
@@ -545,9 +563,11 @@ fn incoming(series: &mut Vec<Series>, m: &Msg, raw: Option<Raw>, source_names: &
             _ => {}
         }
     }
-    s.categories = m.ints(M_CATEGORIES);
-    s.tracks = m.all(M_TRACKING).filter_map(Msg::parse).map(|e| track_of(&e)).filter(|t| crate::track::TRACKERS.contains(&t.tracker) && t.media_id != 0).collect();
-    let meta = s.sync.get_or_insert_with(Meta::default);
+    if !v1 {
+        s.categories = m.ints(M_CATEGORIES);
+        s.tracks = m.all(M_TRACKING).filter_map(Msg::parse).map(|e| track_of(&e)).filter(|t| crate::track::TRACKERS.contains(&t.tracker) && t.media_id != 0).collect();
+    }
+    let meta = if v1 { &mut s.sync1 } else { &mut s.sync }.get_or_insert_with(Meta::default);
     meta.sent.in_library = favorite;
     meta.sent.categories = s.categories.clone();
     meta.sent.tracks = s.tracks.clone();
@@ -649,6 +669,91 @@ fn merge(cfg: &Config, body: &Msg, full: bool) -> Result<Reply, String> {
     decode(bytes, cursor, full_requested)
 }
 
+enum V1Get {
+    Missing,
+    Unchanged,
+    Got(Vec<u8>, String),
+}
+
+/// The old protocol keeps the whole library in one ETag-guarded file.
+fn v1_get(cfg: &Config, etag: &str) -> Result<V1Get, String> {
+    let host = cfg.host.trim().trim_end_matches('/');
+    let mut req = ureq::get(format!("{host}/api/sync/content")).header("X-API-Token", cfg.key.trim()).header("X-Device-ID", &cfg.device_id).header("X-Device-Name", "Nano");
+    if !etag.is_empty() {
+        req = req.header("If-None-Match", etag);
+    }
+    let mut res = match req.call() {
+        Err(ureq::Error::StatusCode(404)) => return Ok(V1Get::Missing),
+        r => r.map_err(status_error)?,
+    };
+    if res.status() == 304 {
+        return Ok(V1Get::Unchanged);
+    }
+    let tag = res.headers().get("ETag").and_then(|v| v.to_str().ok()).ok_or("The server sent no ETag")?.to_string();
+    let bytes = res.body_mut().with_config().limit(512 << 20).read_to_vec().map_err(|e| e.to_string())?;
+    Ok(V1Get::Got(bytes, tag))
+}
+
+/// None if another device changed the file since we read it.
+fn v1_put(cfg: &Config, body: &Msg, etag: &str) -> Result<Option<String>, String> {
+    let gz = gzip(&body.encode())?;
+    let host = cfg.host.trim().trim_end_matches('/');
+    let res = ureq::put(format!("{host}/api/sync/content"))
+        .header("X-API-Token", cfg.key.trim())
+        .header("X-Device-ID", &cfg.device_id)
+        .header("X-Device-Name", "Nano")
+        .header("If-Match", etag)
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Encoding", "gzip")
+        .send(&gz[..]);
+    match res {
+        Err(ureq::Error::StatusCode(412)) => Ok(None),
+        r => {
+            let res = r.map_err(status_error)?;
+            Ok(Some(res.headers().get("ETag").and_then(|v| v.to_str().ok()).unwrap_or("").to_string()))
+        }
+    }
+}
+
+/// Keeps the old whole-library file in step too, if the server has one.
+async fn v1_pass(store: &Entity<Store>, cfg: &mut Config, cx: &mut gpui::AsyncApp) -> Result<usize, String> {
+    let dirty = store.read_with(cx, |s, _| s.sync_dirty_v1());
+    // With changes to send, fetch the file itself.
+    let etag = if dirty { String::new() } else { cfg.v1_etag.clone() };
+    let c = cfg.clone();
+    let (bytes, tag) = match cx.background_executor().spawn(async move { v1_get(&c, &etag) }).await? {
+        V1Get::Got(b, t) => (b, t),
+        V1Get::Missing | V1Get::Unchanged => return Ok(0),
+    };
+    let remote = Msg::parse(&gunzip(bytes.clone())?).ok_or("The server's old library file couldn't be read")?;
+    let reply = decode(bytes.clone(), 0, false)?;
+    let taken = store.update(cx, |s, cx| s.apply_v1(&reply, cx));
+    cfg.v1_etag = tag.clone();
+    let (body, sent) = store.read_with(cx, |s, _| s.v1_outgoing(&remote));
+    if sent.is_empty() {
+        store.update(cx, |s, cx| s.set_v1_etag(tag, cx));
+        return Ok(taken);
+    }
+    // The file is replaced whole, so keep the last one we saw.
+    let kept = store.read_with(cx, |s, _| s.sync_dir().join("v1-before-upload.bin"));
+    let _ = std::fs::create_dir_all(kept.parent().unwrap_or(Path::new(".")));
+    let _ = std::fs::write(kept, &bytes);
+    let c = cfg.clone();
+    let put = cx.background_executor().spawn(async move { v1_put(&c, &body, &tag) }).await?;
+    match put {
+        Some(new_tag) => {
+            cfg.v1_etag = new_tag.clone();
+            store.update(cx, |s, cx| {
+                s.mark_synced_v1(sent, cx);
+                s.set_v1_etag(new_tag, cx);
+            });
+        }
+        // Another device wrote first, so start over from its file next time.
+        None => store.update(cx, |s, cx| s.set_v1_etag(String::new(), cx)),
+    }
+    Ok(taken)
+}
+
 /// Uses the snapshot when there's nothing to send, and a merge when there is.
 pub fn run(store: Entity<Store>, cx: &mut App) {
     let Some(cfg) = store.update(cx, |s, cx| s.start_sync(cx)) else { return };
@@ -664,16 +769,16 @@ pub fn run(store: Entity<Store>, cx: &mut App) {
                     taken = store.update(cx, |s, cx| s.apply_sync(&reply, reply.cursor, cx));
                 }
             }
-            if !store.read_with(cx, |s, _| s.sync_dirty()) {
-                return Ok(taken);
+            if store.read_with(cx, |s, _| s.sync_dirty()) {
+                let (body, sent, categories) = store.read_with(cx, |s, _| s.sync_outgoing());
+                let reply = cx.background_executor().spawn({ let cfg = cfg.clone(); async move { merge(&cfg, &body, false) } }).await?;
+                taken += store.update(cx, |s, cx| {
+                    s.mark_synced(sent, cx);
+                    s.take_categories(reply.categories.clone(), categories);
+                    s.apply_sync(&reply, if reply.full_requested { 0 } else { reply.cursor }, cx)
+                });
             }
-            let (body, sent, categories) = store.read_with(cx, |s, _| s.sync_outgoing());
-            let reply = cx.background_executor().spawn({ let cfg = cfg.clone(); async move { merge(&cfg, &body, false) } }).await?;
-            Ok(store.update(cx, |s, cx| {
-                s.mark_synced(sent, cx);
-                s.take_categories(reply.categories.clone(), categories);
-                taken + s.apply_sync(&reply, if reply.full_requested { 0 } else { reply.cursor }, cx)
-            }))
+            Ok(taken + v1_pass(&store, &mut cfg, cx).await?)
         }
         .await;
         store.update(cx, |s, cx| s.finish_sync(result, cx));
@@ -808,6 +913,59 @@ pub struct Sent {
     raw: Raw,
 }
 
+/// The old file with our changes laid into it.
+fn v1_merge(series: &[Series], remote: &Msg, now: i64) -> (Msg, Vec<Sent>) {
+    let mut body = remote.clone();
+    let mut sent = vec![];
+    let mut sources: HashMap<String, String> = HashMap::new();
+    for s in series.iter().filter(|s| dirty1(s)) {
+        let at = body.0.iter().position(|(n, v)| {
+            matches!((n, v), (&B_MANGA, Val::Bytes(b)) if Msg::parse(b).is_some_and(|m| (m.int(M_SOURCE) as u64).to_string() == s.source && m.str(M_URL) == s.url()))
+        });
+        let theirs = at.and_then(|i| match &body.0[i].1 {
+            Val::Bytes(b) => Msg::parse(b),
+            _ => None,
+        });
+        let raw = theirs.as_ref().map(|m| {
+            let mut raw = Raw::default();
+            raw.update(m);
+            raw
+        });
+        let (out, raw) = outgoing_since(s, s.sync1.as_ref().map(|m| &m.sent), raw, now);
+        // Their chapters and history stay, ours replace or join them.
+        let mut full = raw.manga.clone();
+        let mut seen = std::collections::HashSet::new();
+        if let Some(t) = &theirs {
+            for c in t.all(M_CHAPTERS).filter_map(Msg::parse) {
+                let url = c.str(C_URL);
+                full.push(M_CHAPTERS, raw.chapters.get(&url).unwrap_or(&c));
+                seen.insert(url);
+            }
+            for h in t.all(M_HISTORY).filter_map(Msg::parse) {
+                full.push(M_HISTORY, &h);
+            }
+        }
+        let mut fresh: Vec<&Msg> = raw.chapters.values().filter(|c| !seen.contains(&c.str(C_URL))).collect();
+        fresh.sort_by_key(|c| c.int(C_ORDER));
+        for c in fresh {
+            full.push(M_CHAPTERS, c);
+        }
+        for h in out.all(M_HISTORY).filter_map(Msg::parse) {
+            full.push(M_HISTORY, &h);
+        }
+        match at {
+            Some(i) => body.0[i].1 = Val::Bytes(full.encode()),
+            None => body.push(B_MANGA, &full),
+        }
+        sources.insert(s.source.clone(), s.source_name.clone());
+        sent.push(Sent { source: s.source.clone(), url: s.url().to_string(), snapshot: Snapshot::of(s), raw });
+    }
+    let known: std::collections::HashSet<String> = remote.all(B_SOURCES).filter_map(Msg::parse).map(|m| (m.int(2) as u64).to_string()).collect();
+    sources.retain(|id, _| !known.contains(id));
+    put_sources(&mut body, sources);
+    (body, sent)
+}
+
 impl Store {
     fn sync_dirty(&self) -> bool {
         self.categories_changed() || self.all_series().iter().any(dirty)
@@ -837,6 +995,36 @@ impl Store {
             }
         }
         (body, sent, categories)
+    }
+
+    fn sync_dirty_v1(&self) -> bool {
+        self.all_series().iter().any(dirty1)
+    }
+
+    fn v1_outgoing(&self, remote: &Msg) -> (Msg, Vec<Sent>) {
+        v1_merge(self.all_series(), remote, now_ms())
+    }
+
+    fn mark_synced_v1(&mut self, sent: Vec<Sent>, cx: &mut gpui::Context<Self>) {
+        self.edit_series(cx, |series| {
+            for x in sent {
+                if let Some(s) = series.iter_mut().find(|s| s.source == x.source && s.url() == x.url) {
+                    s.sync1 = Some(Meta { sent: x.snapshot });
+                }
+            }
+        });
+    }
+
+    fn apply_v1(&mut self, reply: &Reply, cx: &mut gpui::Context<Self>) -> usize {
+        let mut taken = 0;
+        self.edit_series(cx, |series| {
+            for m in &reply.mangas {
+                if incoming_from(series, m, None, &reply.sources, false, true).is_some() {
+                    taken += 1;
+                }
+            }
+        });
+        taken
     }
 
     pub fn mark_synced(&mut self, sent: Vec<Sent>, cx: &mut gpui::Context<Self>) {
@@ -1096,4 +1284,44 @@ mod tests {
         let (ix, _) = incoming(&mut list, &m, None, &HashMap::new(), true).expect("a restore keeps history");
         assert!(!list[ix].in_library && list[ix].progress.is_some());
     }
+    #[test]
+    fn the_old_file_keeps_everything_else_and_takes_our_reads() {
+        // The phone's file has /m with /c0 read, another series, and an unknown top-level field.
+        let mut c0 = Msg::default();
+        c0.set_str(C_URL, "/c0");
+        c0.set_int(C_READ, 1);
+        let mut c9 = Msg::default();
+        c9.set_str(C_URL, "/c9");
+        let mut phone = new_manga(&series());
+        phone.set_int(M_VERSION, 4);
+        phone.push(M_CHAPTERS, &c0);
+        phone.push(M_CHAPTERS, &c9);
+        let mut other = Msg::default();
+        other.set_int(M_SOURCE, 1);
+        other.set_str(M_URL, "/other");
+        let mut remote = Msg::default();
+        remote.push(B_MANGA, &phone);
+        remote.push(B_MANGA, &other);
+        remote.0.push((105, Val::Bytes(vec![1, 2, 3])));
+
+        let mut list = vec![];
+        incoming_from(&mut list, &phone, None, &HashMap::new(), false, true).unwrap();
+        let s = &mut list[0];
+        assert!(!dirty1(s), "just came from there");
+        s.chapters = series().chapters;
+        s.progress = Some(Progress { chapter_url: "/c2".into(), chapter_name: "Ch.2".into(), page: 1, pages: 10, at: 4000 });
+        assert!(dirty1(s));
+
+        let (body, sent) = v1_merge(&list, &remote, 5000);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(body.all(B_MANGA).count(), 2, "their other series stays");
+        assert_eq!(body.all(105).next(), Some(&[1u8, 2, 3][..]), "unknown top-level field stays");
+        let mine = body.all(B_MANGA).filter_map(Msg::parse).find(|m| m.str(M_URL) == "/m").unwrap();
+        let urls: Vec<String> = mine.all(M_CHAPTERS).filter_map(Msg::parse).map(|c| c.str(C_URL)).collect();
+        assert!(urls.contains(&"/c0".to_string()) && urls.contains(&"/c9".to_string()), "their chapters stay: {urls:?}");
+        let c1 = mine.all(M_CHAPTERS).filter_map(Msg::parse).find(|c| c.str(C_URL) == "/c1").unwrap();
+        assert_eq!(c1.bool(C_READ), Some(true), "read before /c2");
+        assert_eq!(mine.all(M_HISTORY).count(), 1);
+    }
+
 }

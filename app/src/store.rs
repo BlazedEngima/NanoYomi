@@ -23,6 +23,9 @@ pub struct Series {
     pub scanlators_chosen: bool,
     #[serde(default)]
     pub sync: Option<crate::sync::Meta>,
+    /// Same as `sync`, for the old whole-library file.
+    #[serde(default)]
+    pub sync1: Option<crate::sync::Meta>,
     /// Chapters marked read (true) or unread (false) by hand, by url. They win over what the progress implies.
     #[serde(default)]
     pub marks: std::collections::BTreeMap<String, bool>,
@@ -93,6 +96,7 @@ impl Series {
             hidden_scanlators: vec![],
             scanlators_chosen: false,
             sync: None,
+            sync1: None,
             marks: Default::default(),
             bookmarks: Default::default(),
             categories: vec![],
@@ -387,7 +391,13 @@ impl Store {
         self.data.sync.host = host.into();
         self.data.sync.key = key.into();
         self.data.sync.cursor = 0;
-        self.edit_series(cx, |series| series.iter_mut().for_each(|s| s.sync = None));
+        self.data.sync.v1_etag.clear();
+        self.edit_series(cx, |series| series.iter_mut().for_each(|s| (s.sync, s.sync1) = (None, None)));
+    }
+
+    pub fn set_v1_etag(&mut self, etag: String, cx: &mut Context<Self>) {
+        self.data.sync.v1_etag = etag;
+        self.save_soon(cx);
     }
 
     pub fn set_sync_cursor(&mut self, cursor: i64, cx: &mut Context<Self>) {
