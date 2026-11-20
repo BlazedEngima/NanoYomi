@@ -255,9 +255,15 @@ async fn call_raw(host: &Arc<Host>, cx: &mut AsyncApp, op: &str, params: Value) 
                 Some(Err(e)) => eprintln!("{e}, trying the webview"),
                 None => {}
             }
-            let solved = cx.update(|cx| challenge::solve(cx, host.clone(), url, challenge::browser_user_agent(user_agent)));
+            let solved = cx.update(|cx| challenge::solve(cx, host.clone(), url.clone(), challenge::browser_user_agent(user_agent)));
             if solved.await.unwrap_or(false) {
-                host.call(op, params).await.map_err(|e| e.to_string())
+                match host.call(op, params).await {
+                    Err(HostError::Challenge { .. }) => {
+                        let site = url.split('/').nth(2).unwrap_or(&url);
+                        Err(format!("{site} still blocks Nano after the check passed. A FlareSolverr or Byparr address in Settings may get past it."))
+                    }
+                    other => other.map_err(|e| e.to_string()),
+                }
             } else {
                 Err("Verification was cancelled".into())
             }
