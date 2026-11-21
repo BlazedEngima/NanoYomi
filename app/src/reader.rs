@@ -8,7 +8,7 @@ use crate::{BG, FAINT, HOVER, LINE, MONO, MUTED, SURFACE, Source, TEXT, drop_ima
 use gpui::{
     AnyElement, Bounds, Context, DispatchPhase, Entity, EventEmitter, FocusHandle, InteractiveElement, IntoElement,
     KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, Render, ScrollStrategy, SharedString, Size, StatefulInteractiveElement, Styled,
+    ParentElement, Pixels, Point, Render, ScrollEvent, ScrollStrategy, SharedString, Size, StatefulInteractiveElement, Styled,
     UniformListScrollHandle, Window, canvas, div, img, list, prelude::FluentBuilder, px, relative, rgb, rgba,
     uniform_list,
 };
@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 
 /// Webtoons read better as a column than stretched across a wide window.
 const COLUMN_MAX: f32 = 900.;
+const KEY_STEP: f32 = 120.;
+const WHEEL_STEP: f32 = 80.;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Mode {
@@ -71,6 +73,8 @@ pub struct Reader {
     scrubbing: bool,
     chapter_menu: bool,
     chapter_scroll: UniformListScrollHandle,
+    glide: f32,
+    glide_at: Instant,
 }
 
 impl EventEmitter<ReaderEvent> for Reader {}
@@ -117,6 +121,8 @@ impl Reader {
             scrubbing: false,
             chapter_menu: false,
             chapter_scroll: UniformListScrollHandle::new(),
+            glide: 0.,
+            glide_at: Instant::now(),
         };
         this.show_chrome(Duration::from_secs(1), cx);
         this.open_chapter(index, page, cx);
@@ -130,6 +136,14 @@ impl Reader {
         self.chrome = true;
         self.chrome_until = Instant::now() + for_;
         self.schedule_hide(cx);
+    }
+
+    fn glide_by(&mut self, dy: f32, cx: &mut Context<Self>) {
+        if self.glide == 0. {
+            self.glide_at = Instant::now();
+        }
+        self.glide += dy;
+        cx.notify();
     }
 
     fn extend_chrome(&mut self, cx: &mut Context<Self>) {
@@ -181,6 +195,7 @@ impl Reader {
         self.page = 0;
         self.inflight.clear();
         self.generation += 1;
+        self.glide = 0.;
         self.strip.reset(0);
         self.status = "Loading chapter…".into();
         cx.notify();
@@ -278,6 +293,7 @@ impl Reader {
         self.store.update(cx, |s, cx| s.edit_prefs(cx, |p| p.vertical_reader = vertical));
         self.inflight.clear();
         self.generation += 1;
+        self.glide = 0.;
         if !self.pages.is_empty() {
             self.strip.reset(self.pages.len() + 1);
             self.strip.scroll_to(ListOffset { item_ix: self.page, offset_in_item: px(0.) });
@@ -607,18 +623,16 @@ impl Reader {
             (_, "escape") if self.chapter_menu => self.toggle_chapter_menu(cx),
             (_, "escape") => cx.emit(ReaderEvent::Close),
             (_, "v") => self.toggle_mode(window, cx),
-            (Mode::Paged, "space" | "pagedown" | "down") => self.go(1, window, cx),
-            (Mode::Paged, "pageup" | "up") => self.go(-1, window, cx),
             (Mode::Paged, "right") => self.go(self.forward(), window, cx),
             (Mode::Paged, "left") => self.go(-self.forward(), window, cx),
-            (Mode::Vertical, "space" | "pagedown" | "down" | "right") => {
-                self.strip.scroll_by(px(screen));
-                cx.notify();
-            }
-            (Mode::Vertical, "pageup" | "up" | "left") => {
-                self.strip.scroll_by(px(-screen));
-                cx.notify();
-            }
+            (Mode::Paged, "space" | "pagedown" | "down") => self.go(1, window, cx),
+            (Mode::Paged, "pageup" | "up") => self.go(-1, window, cx),
+            (Mode::Vertical, "left") => self.prev_chapter(cx),
+            (Mode::Vertical, "right") => self.next_chapter(cx),
+            (Mode::Vertical, "down") => self.glide_by(KEY_STEP, cx),
+            (Mode::Vertical, "up") => self.glide_by(-KEY_STEP, cx),
+            (Mode::Vertical, "space" | "pagedown") => self.glide_by(screen, cx),
+            (Mode::Vertical, "pageup") => self.glide_by(-screen, cx),
             _ => {}
         }
     }
@@ -696,6 +710,10 @@ impl Reader {
     }
 }
 
+fn glide_step(remaining: f32, dt: f32) -> f32 {
+    remaining * (1. - (-dt.min(0.05) / 0.09).exp())
+}
+
 fn scrub_index(t: f32, n: usize) -> usize {
     (t.clamp(0., 1.) * (n - 1) as f32).round() as usize
 }
@@ -723,6 +741,19 @@ impl Render for Reader {
         self.viewport = window.viewport_size();
         self.scale = window.scale_factor();
         let len = self.pages.len();
+
+        if self.glide != 0. {
+            let now = Instant::now();
+            let step = glide_step(self.glide, now.duration_since(self.glide_at).as_secs_f32());
+            self.glide_at = now;
+            self.strip.scroll_by(px(step));
+            self.glide -= step;
+            if self.glide.abs() < 0.5 {
+                self.glide = 0.;
+            } else {
+                window.request_animation_frame();
+            }
+        }
 
         // In vertical mode the reading position is the page at the top.
         if self.mode == Mode::Vertical && len > 0 {
@@ -768,11 +799,26 @@ impl Render for Reader {
                 .into_any_element(),
             Mode::Vertical => {
                 let this = cx.entity();
+                let entity = this.downgrade();
+                // GPUI scrolls 20 px per wheel notch, so notches glide and trackpads stay native
+                let wheel = canvas(|_, _, _| (), move |bounds, _, window, _| {
+                    let e = entity.clone();
+                    window.on_mouse_event(move |ev: &ScrollEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Capture && !ev.delta.precise() && bounds.contains(&ev.position) && e.read_with(cx, |r, _| !r.chapter_menu).unwrap_or(false) {
+                            cx.stop_propagation();
+                            let dy = -f32::from(ev.delta.pixel_delta(px(WHEEL_STEP)).y);
+                            let _ = e.update(cx, |r, cx| r.glide_by(dy, cx));
+                        }
+                    });
+                })
+                .absolute()
+                .size_full();
                 div()
                     .id("strip")
                     .size_full()
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_chrome(cx)))
                     .child(list(self.strip.clone(), move |ix, _window, cx| this.update(cx, |this, cx| this.strip_item(ix, cx))).size_full())
+                    .child(wheel)
                     .into_any_element()
             }
         };
@@ -781,7 +827,7 @@ impl Render for Reader {
         let position = if len == 0 { String::new() } else { format!("p.{} / {}", self.page + 1, len) };
         let keys = match self.mode {
             Mode::Paged => "← → turn · V mode · esc close",
-            Mode::Vertical => "↑ ↓ scroll · V mode · esc close",
+            Mode::Vertical => "↑ ↓ scroll · ← → chapter · V mode · esc close",
         };
 
         let mut root = div()
@@ -904,6 +950,17 @@ impl Render for Reader {
 #[cfg(test)]
 mod tests {
     use gpui::{px, size};
+
+    #[test]
+    fn glide_eats_a_share_and_settles() {
+        assert_eq!(super::glide_step(100., 0.), 0.);
+        let (mut left, mut frames) = (-100f32, 0);
+        while left.abs() >= 0.5 {
+            left -= super::glide_step(left, 1. / 60.);
+            frames += 1;
+        }
+        assert!(left <= 0. && frames < 60);
+    }
 
     #[test]
     fn scrubber_maps_and_spaces_pages() {
