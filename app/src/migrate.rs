@@ -135,12 +135,12 @@ impl Migrate {
 }
 
 /// The source's chapter number, or one read from the name when it's unset (as Mihon does).
-fn chapter_number(c: &Value) -> Option<f64> {
+pub fn chapter_number(c: &Value) -> Option<f64> {
     c["chapterNumber"].as_f64().filter(|n| *n >= 0.).or_else(|| c["name"].as_str().and_then(name_number))
 }
 
 /// Reads the number after "ch", "chapter", "ep" or "episode", or else the first number in the name.
-fn name_number(name: &str) -> Option<f64> {
+pub fn name_number(name: &str) -> Option<f64> {
     let lower = name.to_lowercase();
     let number_at = |s: &str| -> Option<f64> {
         let s = s.trim_start_matches(|c: char| c == '.' || c == ':' || c == '#' || c.is_whitespace());

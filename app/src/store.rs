@@ -186,11 +186,20 @@ impl Series {
         }
     }
 
-    /// The highest chapter number read, which is what trackers count.
+    /// The highest chapter number read, which is what trackers count. Falls back to how many chapters are read.
     pub fn read_number(&self) -> f32 {
-        let list = self.visible();
-        let read = self.read_flags(&list);
-        list.iter().zip(read).filter(|(_, r)| *r).filter_map(|(c, _)| c["chapterNumber"].as_f64()).fold(0., |a, n| a.max(n as f32))
+        let mut list = self.visible();
+        if self.progress.as_ref().is_some_and(|p| !list.iter().any(|c| c["url"] == p.chapter_url.as_str())) {
+            list = self.chapters.clone();
+        }
+        let flags = self.read_flags(&list);
+        let read: Vec<&Value> = list.iter().zip(flags).filter(|(_, r)| *r).map(|(c, _)| c).collect();
+        let highest = read.iter().filter_map(|c| crate::migrate::chapter_number(c)).fold(0., f64::max) as f32;
+        match highest {
+            n if n > 0. => n,
+            _ if !read.is_empty() => read.len() as f32,
+            _ => self.progress.as_ref().and_then(|p| crate::migrate::name_number(&p.chapter_name)).unwrap_or(0.) as f32,
+        }
     }
 
     pub fn toggle_bookmark(&mut self, url: &str) {
@@ -687,6 +696,18 @@ mod tests {
         assert_eq!(ago(now - 30 * 3_600_000, now), "Yesterday");
         assert_eq!(ago(now - 4 * 86_400_000, now), "4 days ago");
         assert_eq!(ago(now - 40 * 86_400_000, now), "2025-10-08");
+    }
+
+    #[test]
+    fn read_number_survives_unnumbered_and_hidden_chapters() {
+        let mut s = Series::new("1".into(), "S".into(), json!({ "url": "/m" }));
+        s.chapters = (0..5).rev().map(|i| json!({ "url": format!("/c{i}"), "chapterNumber": -1.0 })).collect();
+        s.progress = Some(Progress { chapter_url: "/c2".into(), chapter_name: "".into(), page: 0, pages: 2, at: 0 });
+        assert_eq!(s.read_number(), 2.);
+        s.chapters[3] = json!({ "url": "/c1", "chapterNumber": -1.0, "name": "Chapter 7" });
+        assert_eq!(s.read_number(), 7.);
+        s.progress = Some(Progress { chapter_url: "/gone".into(), chapter_name: "Ch. 9".into(), page: 1, pages: 2, at: 0 });
+        assert_eq!(s.read_number(), 9.);
     }
 
     #[test]
