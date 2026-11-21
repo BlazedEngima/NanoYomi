@@ -259,6 +259,8 @@ pub struct Prefs {
     pub auto_download: bool,
     #[serde(default)]
     pub reader_fullscreen: bool,
+    #[serde(default)]
+    pub chapters_oldest_first: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]

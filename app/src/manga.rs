@@ -15,6 +15,7 @@ use gpui::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+const DATE_W: f32 = 96.;
 const PAD: f32 = 24.;
 /// The series panel's width beside the grid.
 pub const PANEL: f32 = 440.;
@@ -427,10 +428,13 @@ impl MangaView {
                         .text_color(rgb(FAINT))
                         .flex()
                         .py_2()
+                        .px(u(4.))
+                        .gap_3()
                         .border_b_1()
                         .border_color(rgb(LINE))
                         .child(div().flex_1().child("CHAPTER"))
-                        .child(div().child("DATE")),
+                        .child(div().w(u(DATE_W)).child("DATE"))
+                        .child(div().w(u(24.))),
                 )
                 .into_any_element(),
             Some(Item::Row(r)) => {
@@ -475,7 +479,7 @@ impl MangaView {
                                     .when(!group.is_empty(), |d| d.child(div().truncate().text_size(u(12.)).text_color(rgb(FAINT)).child(group))),
                             )
                             .children(self.download_badge(i, cx))
-                            .child(mono(div()).flex_none().text_color(rgb(if read { FAINT } else { MUTED })).child(date))
+                            .child(mono(div()).flex_none().w(u(DATE_W)).text_color(rgb(if read { FAINT } else { MUTED })).child(date))
                             .child(
                                 div()
                                     .id(("more", i))
@@ -524,6 +528,24 @@ impl MangaView {
             format!("{} of {}", self.visible.len(), self.chapters.len())
         };
         let picker = (groups.len() > 1).then(|| self.scanlator_menu(groups, cx));
+        let oldest_first = self.store.read(cx).prefs().chapters_oldest_first;
+        let sort = div()
+            .id("sort-chapters")
+            .h(u(40.))
+            .px(u(16.))
+            .rounded(u(20.))
+            .border_1()
+            .border_color(rgb(LINE))
+            .flex()
+            .items_center()
+            .text_size(u(13.))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(SURFACE)))
+            .child(if oldest_first { "Oldest first" } else { "Newest first" })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.store.update(cx, |s, cx| s.edit_prefs(cx, |p| p.chapters_oldest_first = !oldest_first));
+                this.list.remeasure();
+            }));
         div()
             .w_full()
             .px(u(PAD))
@@ -533,7 +555,7 @@ impl MangaView {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(div().w_full().flex().items_end().gap_4().child(div().flex_1().min_w_0().child(heading("Chapters", note))).children(picker))
+                    .child(div().w_full().flex().items_end().gap_4().child(div().flex_1().min_w_0().child(heading("Chapters", note))).child(sort).children(picker))
                     .child(self.search.clone()),
             )
             .into_any_element()
@@ -809,6 +831,9 @@ impl Render for MangaView {
         self.rows = (0..self.visible.len())
             .filter(|&i| query.is_empty() || self.visible[i]["name"].as_str().unwrap_or("").to_lowercase().contains(&query))
             .collect();
+        if self.store.read(cx).prefs().chapters_oldest_first {
+            self.rows.reverse();
+        }
         let mut items = vec![Item::Hero, Item::Bar, Item::Header];
         if self.rows.is_empty() {
             items.push(Item::Empty);
