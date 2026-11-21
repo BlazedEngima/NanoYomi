@@ -248,6 +248,8 @@ pub struct Prefs {
     pub sidebar_collapsed: bool,
     #[serde(default)]
     pub auto_download: bool,
+    #[serde(default)]
+    pub reader_fullscreen: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]

@@ -509,7 +509,10 @@ impl Root {
         let (cache, store) = (self.cache.clone(), self.store.clone());
         let reader = cx.new(|cx| Reader::new(source, cache, store, manga, chapters, index, page, window, cx));
         let sub = cx.subscribe_in(&reader, window, |this, reader, _: &ReaderEvent, window, cx| {
-            reader.update(cx, |r, cx| r.release_all(Some(window), cx));
+            reader.update(cx, |r, cx| {
+                r.release_all(Some(window), cx);
+                r.leave_fullscreen(window);
+            });
             this.reader = None;
             sync::run(this.store.clone(), cx);
             this.focus.focus(window, cx);

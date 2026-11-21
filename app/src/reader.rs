@@ -75,6 +75,9 @@ pub struct Reader {
     chapter_scroll: UniformListScrollHandle,
     glide: f32,
     glide_at: Instant,
+    entered_fullscreen: bool,
+    refit: bool,
+    decoded_for: Size<Pixels>,
 }
 
 impl EventEmitter<ReaderEvent> for Reader {}
@@ -123,7 +126,15 @@ impl Reader {
             chapter_scroll: UniformListScrollHandle::new(),
             glide: 0.,
             glide_at: Instant::now(),
+            entered_fullscreen: false,
+            refit: false,
+            decoded_for: window.viewport_size(),
         };
+        if this.store.read(cx).prefs().reader_fullscreen && !window.is_fullscreen() {
+            window.toggle_fullscreen();
+            this.entered_fullscreen = true;
+            this.refit = true;
+        }
         this.show_chrome(Duration::from_secs(1), cx);
         this.open_chapter(index, page, cx);
         if crate::demo().is_some() {
@@ -136,6 +147,13 @@ impl Reader {
         self.chrome = true;
         self.chrome_until = Instant::now() + for_;
         self.schedule_hide(cx);
+    }
+
+    pub fn leave_fullscreen(&mut self, window: &mut Window) {
+        if self.entered_fullscreen && window.is_fullscreen() {
+            window.toggle_fullscreen();
+        }
+        self.entered_fullscreen = false;
     }
 
     fn glide_by(&mut self, dy: f32, cx: &mut Context<Self>) {
@@ -623,6 +641,7 @@ impl Reader {
             (_, "escape") if self.chapter_menu => self.toggle_chapter_menu(cx),
             (_, "escape") => cx.emit(ReaderEvent::Close),
             (_, "v") => self.toggle_mode(window, cx),
+            (_, "f") => window.toggle_fullscreen(),
             (Mode::Paged, "right") => self.go(self.forward(), window, cx),
             (Mode::Paged, "left") => self.go(-self.forward(), window, cx),
             (Mode::Paged, "space" | "pagedown" | "down") => self.go(1, window, cx),
@@ -755,6 +774,18 @@ impl Render for Reader {
             }
         }
 
+        // Pages decode to fit the window, so redo them once fullscreen has its size
+        if self.refit && window.is_fullscreen() && self.viewport != self.decoded_for {
+            self.refit = false;
+            self.decoded_for = self.viewport;
+            if len > 0 {
+                self.release_all(Some(window), cx);
+                self.inflight.clear();
+                self.generation += 1;
+                self.sync(Some(window), cx);
+            }
+        }
+
         // In vertical mode the reading position is the page at the top.
         if self.mode == Mode::Vertical && len > 0 {
             let at_end = self.strip.bounds_for_item(len).is_some_and(|b| b.bottom() <= self.strip.viewport_bounds().bottom() + px(1.));
@@ -826,8 +857,8 @@ impl Render for Reader {
         let chapter: SharedString = self.chapters[self.chapter]["name"].as_str().unwrap_or("Chapter").to_string().into();
         let position = if len == 0 { String::new() } else { format!("p.{} / {}", self.page + 1, len) };
         let keys = match self.mode {
-            Mode::Paged => "← → turn · V mode · esc close",
-            Mode::Vertical => "↑ ↓ scroll · ← → chapter · V mode · esc close",
+            Mode::Paged => "← → turn · V mode · F fullscreen · esc close",
+            Mode::Vertical => "↑ ↓ scroll · ← → chapter · V mode · F fullscreen · esc close",
         };
 
         let mut root = div()

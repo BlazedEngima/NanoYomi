@@ -313,6 +313,30 @@ impl Render for Settings {
                     )),
             )
             .child(div().flex_none().flex().gap(u(6.)).child(mode_chip("mode-ltr", "Left to right", (false, false), self.store.clone())).child(mode_chip("mode-rtl", "Right to left", (false, true), self.store.clone())).child(mode_chip("mode-vertical", "Vertical", (true, false), self.store.clone())));
+        let full = self.store.read(cx).prefs().reader_fullscreen;
+        let full_chip = |id: &'static str, label: &'static str, value: bool, store: Entity<Store>| {
+            small_button(id, label, full == value).on_click(move |_, _, cx| store.update(cx, |s, cx| s.edit_prefs(cx, |p| p.reader_fullscreen = value)))
+        };
+        let fullscreen = div()
+            .w_full()
+            .py(u(14.))
+            .border_b_1()
+            .border_color(rgb(RULE))
+            .flex()
+            .items_center()
+            .gap_4()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(u(4.))
+                    .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child("Fullscreen reader"))
+                    .child(div().text_size(u(13.)).text_color(rgb(MUTED)).child("Go fullscreen when a chapter opens, and back when it closes. Press F in the reader to toggle it.")),
+            )
+            .child(div().flex_none().flex().gap(u(6.)).child(full_chip("full-off", "Off", false, self.store.clone())).child(full_chip("full-on", "On", true, self.store.clone())));
+
         let chosen = self.store.read(cx).prefs().host_heap_mb;
         let auto = crate::host::auto_heap_mb();
         let effective = chosen.unwrap_or(auto);
@@ -480,6 +504,7 @@ impl Render for Settings {
             .child(heading("Settings", ""))
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("READING"))
             .child(reading)
+            .child(fullscreen)
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("CATEGORIES"))
             .child(categories)
             .child(div().pt(u(24.)).pb(u(10.)).font_family(MONO).text_size(u(11.)).text_color(rgb(FAINT)).child("DOWNLOADS"))
