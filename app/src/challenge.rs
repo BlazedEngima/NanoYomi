@@ -67,20 +67,26 @@ pub fn browse(cx: &mut App, host: Arc<Host>, url: String, user_agent: String) {
 fn open(cx: &mut App, host: Arc<Host>, url: String, user_agent: String, title: &'static str, mode: Mode) {
     let Some(main) = main_window(cx) else { return };
     let _ = main.update(cx, |root, window, cx| {
+        let mut builder = crate::webviews::builder().with_url(&url).with_bounds(rect(window.viewport_size()));
+        if !user_agent.is_empty() {
+            builder = builder.with_user_agent(&user_agent);
+        }
+        let webview = match builder.build_as_child(window) {
+            Ok(wv) => wv,
+            Err(e) => {
+                eprintln!("system webview unavailable: {e}");
+                return;
+            }
+        };
         let root_weak = cx.weak_entity();
-        root.check = Some(cx.new(|cx| Check::new(host, url, user_agent, title, mode, root_weak, window, cx)));
+        root.check = Some(cx.new(|cx| Check::new(webview, host, url, user_agent, title, mode, root_weak, window, cx)));
         cx.notify();
     });
 }
 
 impl Check {
     #[allow(clippy::too_many_arguments)]
-    fn new(host: Arc<Host>, url: String, user_agent: String, title: &'static str, mode: Mode, root: WeakEntity<crate::Root>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut builder = crate::webviews::builder().with_url(&url).with_bounds(rect(window.viewport_size()));
-        if !user_agent.is_empty() {
-            builder = builder.with_user_agent(&user_agent);
-        }
-        let webview = builder.build_as_child(window).expect("system webview unavailable");
+    fn new(webview: wry::WebView, host: Arc<Host>, url: String, user_agent: String, title: &'static str, mode: Mode, root: WeakEntity<crate::Root>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Kept drawn off to the side so the page runs at full speed.
         crate::webviews::native::keep_running_hidden(&webview);
         let sign_in = matches!(mode, Mode::SignIn);
