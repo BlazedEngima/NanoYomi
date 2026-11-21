@@ -6,7 +6,7 @@ use crate::images::ImageCache;
 use crate::input::{InputEvent, TextInput};
 use crate::registry::Registry;
 use crate::store::{Progress, Series, Store};
-use crate::{FAINT, LINE, MONO, MUTED, RULE, Source, TEXT, heading, u};
+use crate::{FAINT, LINE, MUTED, RULE, Source, TEXT, heading, u};
 use gpui::{
     AppContext, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder, rgb,
@@ -135,12 +135,12 @@ impl Migrate {
 }
 
 /// The source's chapter number, or one read from the name when it's unset (as Mihon does).
-fn chapter_number(c: &Value) -> Option<f64> {
+pub fn chapter_number(c: &Value) -> Option<f64> {
     c["chapterNumber"].as_f64().filter(|n| *n >= 0.).or_else(|| c["name"].as_str().and_then(name_number))
 }
 
 /// Reads the number after "ch", "chapter", "ep" or "episode", or else the first number in the name.
-fn name_number(name: &str) -> Option<f64> {
+pub fn name_number(name: &str) -> Option<f64> {
     let lower = name.to_lowercase();
     let number_at = |s: &str| -> Option<f64> {
         let s = s.trim_start_matches(|c: char| c == '.' || c == ':' || c == '#' || c.is_whitespace());
@@ -223,7 +223,7 @@ impl Render for Migrate {
                     .flex()
                     .flex_col()
                     .gap(u(10.))
-                    .child(div().font_family(MONO).text_size(u(12.)).text_color(rgb(MUTED)).child(name.to_uppercase()))
+                    .child(div().font_family(crate::fonts::mono()).text_size(u(12.)).text_color(rgb(MUTED)).child(name.to_uppercase()))
                     .child(body),
             );
         }
