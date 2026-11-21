@@ -4,7 +4,7 @@
 use crate::images::{self, ImageCache, Picture, picture_size};
 use crate::page_cache;
 use crate::store::{Progress, Store, now_ms};
-use crate::{BG, FAINT, HOVER, LINE, MONO, MUTED, SURFACE, Source, TEXT, drop_images, pill};
+use crate::{BG, FAINT, HOVER, LINE, MUTED, SURFACE, Source, TEXT, drop_images, pill};
 use gpui::{
     AnyElement, Bounds, Context, DispatchPhase, Entity, EventEmitter, FocusHandle, InteractiveElement, IntoElement,
     KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -509,7 +509,7 @@ impl Reader {
         let rail = if vertical { rail.top_0().bottom_0().left(relative(0.5)).w(px(2.)).ml(px(-1.)) } else { rail.left_0().right_0().top(relative(0.5)).h(px(2.)).mt(px(-1.)) };
         let dots = (0..n).filter(|i| i % step == 0 || *i == n - 1).map(|i| dot(i, 5., if i <= self.page { MUTED } else { LINE }));
         let label = self.scrubbing.then(|| {
-            let l = div().absolute().font_family(MONO).text_size(crate::u(12.)).text_color(rgb(TEXT)).bg(rgb(SURFACE)).px_1().rounded(crate::u(4.)).whitespace_nowrap().child(format!("{}", self.page + 1));
+            let l = div().absolute().font_family(crate::fonts::mono()).text_size(crate::u(12.)).text_color(rgb(TEXT)).bg(rgb(SURFACE)).px_1().rounded(crate::u(4.)).whitespace_nowrap().child(format!("{}", self.page + 1));
             if vertical { l.right(crate::u(30.)).top(at(self.page)).mt(crate::u(-9.)) } else { l.bottom(crate::u(22.)).left(at(self.page)).ml(crate::u(-12.)) }
         });
 
@@ -927,7 +927,7 @@ impl Render for Reader {
         };
         let (has_prev, has_next) = (self.chapter + 1 < self.chapters.len(), self.chapter > 0);
         let paged = self.mode == Mode::Paged;
-        let corner = |id: &'static str| div().id(id).absolute().bottom(crate::u(28.)).flex().flex_col().gap_1().font_family(MONO).text_size(crate::u(12.)).text_color(rgb(FAINT)).bg(rgba(0x0D0C0BB0)).px_2().py_1().rounded(crate::u(4.));
+        let corner = |id: &'static str| div().id(id).absolute().bottom(crate::u(28.)).flex().flex_col().gap_1().font_family(crate::fonts::mono()).text_size(crate::u(12.)).text_color(rgb(FAINT)).bg(rgba(0x0D0C0BB0)).px_2().py_1().rounded(crate::u(4.));
         let hover = |this: &mut Self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>| {
             if *hovered {
                 this.extend_chrome(cx)

@@ -258,6 +258,8 @@ pub struct Prefs {
     #[serde(default)]
     pub auto_download: bool,
     #[serde(default)]
+    pub fonts: std::collections::HashMap<String, String>,
+    #[serde(default)]
     pub reader_fullscreen: bool,
     #[serde(default)]
     pub chapters_oldest_first: bool,
