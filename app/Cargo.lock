@@ -3659,7 +3659,7 @@ dependencies = [
 
 [[package]]
 name = "nano-reader"
-version = "0.1.0"
+version = "0.2.2"
 dependencies = [
  "async-lock",
  "avif-decode",
@@ -3675,6 +3675,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "objc2-web-kit",
+ "semver",
  "serde",
  "serde_json",
  "sysinfo",
