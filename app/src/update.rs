@@ -102,6 +102,10 @@ pub fn check(store: Entity<Store>, force: bool, cx: &mut App) {
     .detach();
 }
 
+pub fn pending(s: &Store) -> Option<Update> {
+    s.update.clone().filter(|u| u.version != s.prefs().dismissed_update)
+}
+
 /// The pill over the window's corner while a newer release waits.
 pub struct Banner {
     store: Entity<Store>,
@@ -119,7 +123,7 @@ impl Render for Banner {
     #[allow(refining_impl_trait)]
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let s = self.store.read(cx);
-        let Some(update) = s.update.clone().filter(|u| u.version != s.prefs().dismissed_update) else { return div().into_any_element() };
+        let Some(update) = pending(s) else { return div().into_any_element() };
         let (version, url) = (update.version.clone(), update.url);
         let store = self.store.clone();
         div()
