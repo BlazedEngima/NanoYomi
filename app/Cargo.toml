@@ -5,9 +5,9 @@ edition = "2024"
 license = "MPL-2.0"
 
 [dependencies]
-gpui = { git = "https://github.com/Chelys-Bit-Perfect-Player/gpui", rev = "1e8029bb9320a993259166127af633bf200bcd88" }
+gpui = { git = "https://github.com/Chelys-Bit-Perfect-Player/gpui", rev = "df270126f81f3a1ead91d27591aee61621a7cd5a" }
 # Without font-kit, GPUI on macOS uses a text system that draws nothing.
-gpui_platform = { git = "https://github.com/Chelys-Bit-Perfect-Player/gpui", rev = "1e8029bb9320a993259166127af633bf200bcd88", features = ["font-kit", "wayland", "x11"] }
+gpui_platform = { git = "https://github.com/Chelys-Bit-Perfect-Player/gpui", rev = "df270126f81f3a1ead91d27591aee61621a7cd5a", features = ["font-kit", "wayland", "x11"] }
 wry = "0.57"
 futures = "0.3"
 async-lock = "3"
