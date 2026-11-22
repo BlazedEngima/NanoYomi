@@ -2,11 +2,12 @@
 
 use crate::catalog::small_button;
 use crate::host::Host;
+use crate::store::Store;
 use crate::{LINE, RULE, TEXT, u};
 use futures::channel::oneshot;
 use gpui::{
-    App, AppContext, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels, Render, Size,
-    StatefulInteractiveElement, Styled, WeakEntity, Window, WindowHandle, div, px, rgb,
+    App, AppContext, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels, Render, Size,
+    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, WindowHandle, div, px, rgb,
 };
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -37,6 +38,8 @@ pub struct Check {
     waiting: bool,
     site: String,
     root: WeakEntity<crate::Root>,
+    store: Entity<Store>,
+    _sub: Subscription,
 }
 
 /// WebKit has to say it's Safari, or Cloudflare rejects the tick. WebView2 can use the extension's own agent.
@@ -79,14 +82,21 @@ fn open(cx: &mut App, host: Arc<Host>, url: String, user_agent: String, title: &
             }
         };
         let root_weak = cx.weak_entity();
-        root.check = Some(cx.new(|cx| Check::new(webview, host, url, user_agent, title, mode, root_weak, window, cx)));
+        let store = root.store.clone();
+        let check = cx.new(|cx| Check::new(webview, host, url, user_agent, title, mode, root_weak, store, window, cx));
+        root.check_sub = Some(cx.observe(&check, |_, _, cx| cx.notify()));
+        root.check = Some(check);
         cx.notify();
     });
 }
 
 impl Check {
+    pub fn is_open(&self) -> bool {
+        self.shown
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn new(webview: wry::WebView, host: Arc<Host>, url: String, user_agent: String, title: &'static str, mode: Mode, root: WeakEntity<crate::Root>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(webview: wry::WebView, host: Arc<Host>, url: String, user_agent: String, title: &'static str, mode: Mode, root: WeakEntity<crate::Root>, store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Kept drawn off to the side so the page runs at full speed.
         crate::webviews::native::keep_running_hidden(&webview);
         let sign_in = matches!(mode, Mode::SignIn);
@@ -193,7 +203,8 @@ impl Check {
         })
         .detach();
 
-        Check { webview, title, shown: sign_in, waiting: false, site, root }
+        let sub = cx.observe(&store, |_, _, cx| cx.notify());
+        Check { webview, title, shown: sign_in, waiting: false, site, root, store, _sub: sub }
     }
 }
 
@@ -223,7 +234,7 @@ impl Render for Check {
                 .id("check-pill")
                 .occlude()
                 .absolute()
-                .bottom(u(24.))
+                .bottom(u(if crate::update::pending(self.store.read(cx)).is_some() { 24. + 52. } else { 24. }))
                 .right(u(24.))
                 .h(u(40.))
                 .pl(u(16.))
