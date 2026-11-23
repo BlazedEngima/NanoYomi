@@ -17,13 +17,15 @@ pub struct TextInput {
     pub text: String,
     placeholder: SharedString,
     pub icon: bool,
+    pub numeric: bool,
+    pub compact: bool,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
 
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
-        TextInput { focus: cx.focus_handle(), text: String::new(), placeholder: placeholder.into(), icon: true }
+        TextInput { focus: cx.focus_handle(), text: String::new(), placeholder: placeholder.into(), icon: true, numeric: false, compact: false }
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -41,11 +43,12 @@ impl TextInput {
             ("escape", _) => self.text.clear(),
             ("v", true) => {
                 if let Some(t) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                    self.text.push_str(t.lines().next().unwrap_or(""));
+                    let numeric = self.numeric;
+                    self.text.extend(t.lines().next().unwrap_or("").chars().filter(|c| !numeric || c.is_ascii_digit()));
                 }
             }
             (_, false) => match &k.key_char {
-                Some(ch) if !ch.chars().any(char::is_control) => self.text.push_str(ch),
+                Some(ch) if !ch.chars().any(char::is_control) && (!self.numeric || ch.chars().all(|c| c.is_ascii_digit())) => self.text.push_str(ch),
                 _ => return,
             },
             _ => return,
@@ -68,9 +71,9 @@ impl Render for TextInput {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.focus(window, cx)))
-            .h(u(40.))
-            .px(u(16.))
-            .rounded(u(20.))
+            .h(u(if self.compact { 30. } else { 40. }))
+            .px(u(if self.compact { 12. } else { 16. }))
+            .rounded(u(if self.compact { 15. } else { 20. }))
             .border_1()
             .border_color(rgb(if focused { 0x5A544B } else { LINE }))
             .bg(rgb(0x141210))

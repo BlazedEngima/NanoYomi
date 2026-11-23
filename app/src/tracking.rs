@@ -6,9 +6,10 @@ use crate::store::{Store, Track};
 use crate::track::{self, Found};
 use crate::{ACCENT_TEXT, FAINT, LINE, MUTED, RULE, SURFACE, TEXT, u};
 use gpui::{
-    AnyElement, AppContext, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    AnyElement, AppContext, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement,
     Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder, rgb,
 };
+use std::collections::HashMap;
 
 pub struct Close;
 
@@ -18,6 +19,7 @@ pub struct Tracking {
     key: (String, String),
     title: String,
     query: Entity<TextInput>,
+    chapters: HashMap<i64, (Entity<TextInput>, String)>,
     /// The tracker being searched, and what it found.
     searching: Option<i64>,
     results: Vec<Found>,
@@ -43,7 +45,7 @@ impl Tracking {
             }),
         ];
         store.update(cx, |s, _| s.track_error = None);
-        Tracking { store, key, title, query, searching: None, results: vec![], status: "".into(), _subs: subs }
+        Tracking { store, key, title, query, chapters: HashMap::new(), searching: None, results: vec![], status: "".into(), _subs: subs }
     }
 
     fn track(&self, tracker: i64, cx: &Context<Self>) -> Option<Track> {
@@ -120,11 +122,44 @@ impl Tracking {
     }
 
     /// Edits a linked entry here and on the site.
-    fn change(&mut self, mut t: Track, f: impl FnOnce(&mut Track), cx: &mut Context<Self>) {
+    fn change(&mut self, t: Track, f: impl FnOnce(&mut Track), cx: &mut Context<Self>) {
+        let mut t = self.track(t.tracker, cx).unwrap_or(t);
         f(&mut t);
         let key = self.key.clone();
         self.store.update(cx, |s, cx| s.push_track(key, t, cx));
         crate::sync::run(self.store.clone(), cx);
+    }
+
+    fn sync_box(&mut self, t: &Track, cx: &mut Context<Self>) {
+        let (tracker, text) = (t.tracker, (t.last_read as i64).to_string());
+        if !self.chapters.contains_key(&tracker) {
+            let input = cx.new(|cx| {
+                let mut i = TextInput::new("0", cx);
+                (i.icon, i.numeric, i.compact, i.text) = (false, true, true, text.clone());
+                i
+            });
+            self._subs.push(cx.subscribe(&input, move |this, _, _: &InputEvent, cx| this.commit_chapters(tracker, cx)));
+            self.chapters.insert(tracker, (input, text.clone()));
+        }
+        let Some((input, synced)) = self.chapters.get_mut(&tracker) else { return };
+        if input.read(cx).text == *synced && *synced != text {
+            input.update(cx, |i, _| i.text = text.clone());
+            *synced = text;
+        }
+    }
+
+    fn commit_chapters(&mut self, tracker: i64, cx: &mut Context<Self>) {
+        let (Some(t), Some(input)) = (self.track(tracker, cx), self.chapters.get(&tracker).map(|(i, _)| i.clone())) else { return };
+        let n = input.read(cx).text.trim().parse::<u32>().map_or(t.last_read as i64, i64::from);
+        if n != t.last_read as i64 {
+            self.change(t, |t| t.last_read = n as f32, cx);
+        }
+        let text = n.to_string();
+        input.update(cx, |i, _| i.text = text.clone());
+        if let Some(b) = self.chapters.get_mut(&tracker) {
+            b.1 = text;
+        }
+        cx.notify();
     }
 
     fn linked(&self, t: Track, cx: &mut Context<Self>) -> AnyElement {
@@ -139,7 +174,6 @@ impl Tracking {
             chip(id("score", n), if n == 0 { "–".to_string() } else { n.to_string() }, score == n)
                 .on_click(cx.listener(move |this, _, _, cx| this.change(t.clone(), |t| track::set_score(t, n), cx)))
         });
-        let read = t.last_read as i64;
         let total = if t.total > 0 { t.total.to_string() } else { "?".into() };
         let step = |name: &'static str, label: &'static str, by: i64, t: &Track| {
             let t = t.clone();
@@ -187,7 +221,8 @@ impl Tracking {
                     .items_center()
                     .gap_3()
                     .child(step("less", "−", -1, &t))
-                    .child(div().font_family(crate::fonts::mono()).text_size(u(14.)).child(format!("{read} / {total}")))
+                    .children(self.chapters.get(&t.tracker).map(|(i, _)| div().w(u(72.)).font_family(crate::fonts::mono()).text_size(u(14.)).child(i.clone())))
+                    .child(div().font_family(crate::fonts::mono()).text_size(u(14.)).child(format!("/ {total}")))
                     .child(step("more", "+", 1, &t)),
             )
             .child(label("SCORE"))
@@ -239,6 +274,11 @@ impl Tracking {
 impl Render for Tracking {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let error = self.store.read(cx).track_error.clone();
+        for tracker in track::TRACKERS.into_iter().filter(|t| track::configured(*t)) {
+            if let Some(t) = self.track(tracker, cx) {
+                self.sync_box(&t, cx);
+            }
+        }
         let sections: Vec<AnyElement> = track::TRACKERS
             .into_iter()
             .filter(|t| track::configured(*t))
@@ -275,6 +315,11 @@ impl Render for Tracking {
         div()
             .id("tracking")
             .occlude()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                for tracker in this.chapters.keys().copied().collect::<Vec<_>>() {
+                    this.commit_chapters(tracker, cx);
+                }
+            }))
             .absolute()
             .top_0()
             .right_0()
