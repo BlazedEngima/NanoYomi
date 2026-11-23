@@ -5,21 +5,45 @@
 use crate::Source;
 use gpui::{App, AppContext, AsyncApp, Context, Entity, Global};
 use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{OnceLock, RwLock};
 
-static DIR: OnceLock<PathBuf> = OnceLock::new();
+static DEFAULT: OnceLock<PathBuf> = OnceLock::new();
+static DIR: RwLock<Option<PathBuf>> = RwLock::new(None);
+static CBZ: AtomicBool = AtomicBool::new(false);
 const TMP: &str = "_tmp";
+const SIDECAR: &str = "nano.json";
+
+/// How a finished chapter is stored: a folder of page images, or one CBZ archive.
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub enum Format {
+    #[default]
+    Pages,
+    Cbz,
+}
 /// Mihon's limit, less room for its optional hash suffix and ".cbz".
 const MAX_NAME_BYTES: usize = 240 - 11;
 
 pub fn set_dir(dir: PathBuf) {
-    let _ = DIR.set(dir);
+    let _ = DEFAULT.set(dir.clone());
+    *DIR.write().unwrap() = Some(dir);
 }
 
-pub fn dir() -> Option<&'static Path> {
-    DIR.get().map(PathBuf::as_path)
+pub fn default_dir() -> Option<PathBuf> {
+    DEFAULT.get().cloned()
+}
+
+/// Applies the saved settings. An empty folder means the default one.
+pub fn apply(folder: &str, format: Format) {
+    *DIR.write().unwrap() = if folder.is_empty() { default_dir() } else { Some(PathBuf::from(folder)) };
+    CBZ.store(format == Format::Cbz, Ordering::Relaxed);
+}
+
+pub fn dir() -> Option<PathBuf> {
+    DIR.read().unwrap().clone()
 }
 
 /// Mihon's `DiskUtil.buildValidFilename`: no FAT-invalid characters, no leading or trailing dots and spaces.
@@ -47,7 +71,7 @@ fn source_dir(source: &Source) -> Option<PathBuf> {
         return Some(root.join(valid_name(&format!("{} ({})", source.name, source.lang.to_uppercase()), 240)));
     }
     let prefix = format!("{} (", valid_name(&source.name, 240));
-    std::fs::read_dir(root).ok()?.flatten().map(|e| e.path()).find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(&prefix)))
+    std::fs::read_dir(&root).ok()?.flatten().map(|e| e.path()).find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(&prefix)))
 }
 
 pub fn series_dir(source: &Source, title: &str) -> Option<PathBuf> {
@@ -63,22 +87,45 @@ pub fn chapter_name(chapter: &Value) -> String {
     }
 }
 
-/// The finished chapter folders of a series, by folder name.
-pub fn downloaded(source: &Source, title: &str) -> HashSet<String> {
-    let Some(dir) = series_dir(source, title) else { return HashSet::new() };
+/// Finished chapters in a series folder, by name: a folder of pages or a `.cbz` archive.
+fn chapter_names(dir: &Path) -> HashSet<String> {
     let Ok(entries) = std::fs::read_dir(dir) else { return HashSet::new() };
     entries
         .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| !n.ends_with(TMP))
+        .filter_map(|e| {
+            let path = e.path();
+            let name = e.file_name().into_string().ok()?;
+            if path.is_dir() {
+                return (!name.ends_with(TMP)).then_some(name);
+            }
+            is_archive(&path).then(|| path.file_stem()?.to_str().map(str::to_string))?
+        })
         .collect()
+}
+
+fn is_archive(p: &Path) -> bool {
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "cbz" | "zip"))
+}
+
+/// The finished chapters of a series, by name.
+pub fn downloaded(source: &Source, title: &str) -> HashSet<String> {
+    series_dir(source, title).map(|d| chapter_names(&d)).unwrap_or_default()
 }
 
 /// A downloaded chapter's page files in reading order, if it's downloaded.
 pub fn local_pages(source: &Source, title: &str, chapter: &Value) -> Option<Vec<PathBuf>> {
-    let dir = series_dir(source, title)?.join(chapter_name(chapter));
-    let mut pages: Vec<PathBuf> = std::fs::read_dir(&dir).ok()?.flatten().map(|e| e.path()).filter(|p| is_image(p)).collect();
+    let series = series_dir(source, title)?;
+    let name = chapter_name(chapter);
+    let dir = series.join(&name);
+    if !dir.is_dir() {
+        let archive = ["cbz", "zip"].iter().map(|e| series.join(format!("{name}.{e}"))).find(|p| p.is_file())?;
+        return extract(&archive);
+    }
+    images_in(&dir)
+}
+
+fn images_in(dir: &Path) -> Option<Vec<PathBuf>> {
+    let mut pages: Vec<PathBuf> = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).filter(|p| is_image(p)).collect();
     pages.sort();
     (!pages.is_empty()).then_some(pages)
 }
@@ -87,18 +134,112 @@ fn is_image(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif" | "jxl" | "heif"))
 }
 
+fn extract_root() -> PathBuf {
+    std::env::temp_dir().join("nano-cbz")
+}
+
+/// Unpacks an archive's pages to a scratch folder, since pages are read from files. Cleared at launch.
+fn extract(archive: &Path) -> Option<Vec<PathBuf>> {
+    use std::hash::{Hash, Hasher};
+    let meta = archive.metadata().ok()?;
+    let mut hash = std::hash::DefaultHasher::new();
+    (archive, meta.len(), meta.modified().ok()).hash(&mut hash);
+    let out = extract_root().join(format!("{:016x}", hash.finish()));
+    if let Some(pages) = images_in(&out) {
+        return Some(pages);
+    }
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(archive).ok()?).ok()?;
+    let mut entries: Vec<(String, usize)> = (0..zip.len())
+        .filter_map(|i| {
+            let file = zip.by_index(i).ok()?;
+            (!file.is_dir() && is_image(Path::new(file.name()))).then(|| (file.name().to_string(), i))
+        })
+        .collect();
+    entries.sort();
+    let part = out.with_extension("part");
+    let _ = std::fs::remove_dir_all(&part);
+    std::fs::create_dir_all(&part).ok()?;
+    for (n, (name, i)) in entries.iter().enumerate() {
+        let ext = Path::new(name).extension()?.to_str()?;
+        let mut file = std::fs::File::create(part.join(format!("{n:05}.{ext}"))).ok()?;
+        std::io::copy(&mut zip.by_index(*i).ok()?, &mut file).ok()?;
+    }
+    std::fs::rename(&part, &out).ok()?;
+    images_in(&out)
+}
+
+/// Packs a chapter's pages into an archive. Images are already compressed, so they're stored as they are.
+fn pack(pages: &Path, archive: &Path) -> Result<(), String> {
+    let files = images_in(pages).ok_or("no pages to pack")?;
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(archive).map_err(|e| e.to_string())?);
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for path in files {
+        zip.start_file(path.file_name().and_then(|n| n.to_str()).unwrap_or("page"), options).map_err(|e| e.to_string())?;
+        std::io::copy(&mut std::fs::File::open(&path).map_err(|e| e.to_string())?, &mut zip).map_err(|e| e.to_string())?;
+    }
+    zip.finish().map(drop).map_err(|e| e.to_string())
+}
+
 pub fn delete(source: &Source, title: &str, chapter: &Value) {
     if let Some(dir) = series_dir(source, title) {
         let name = chapter_name(chapter);
         let _ = std::fs::remove_dir_all(dir.join(&name));
         let _ = std::fs::remove_dir_all(dir.join(format!("{name}{TMP}")));
+        let _ = std::fs::remove_file(dir.join(format!("{name}.cbz")));
+        let _ = std::fs::remove_file(dir.join(format!("{name}.zip")));
     }
+}
+
+/// A series with chapters on disk, as found by `scan`.
+pub struct Found {
+    pub source_dir: String,
+    pub title: String,
+    pub names: HashSet<String>,
+    /// The series details and chapters saved beside the files when they were downloaded.
+    pub saved: Value,
+}
+
+/// Every series in the downloads folder that has a finished chapter, by title.
+pub fn scan() -> Vec<Found> {
+    let Some(root) = dir() else { return vec![] };
+    let subdirs = |p: &Path| -> Vec<PathBuf> { std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect() };
+    let name = |p: &Path| p.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+    let mut found: Vec<Found> = subdirs(&root)
+        .into_iter()
+        .flat_map(|source| subdirs(&source).into_iter().map(move |series| (source.clone(), series)))
+        .filter_map(|(source, series)| {
+            let names = chapter_names(&series);
+            let saved: Value = std::fs::read(series.join(SIDECAR)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            (!names.is_empty()).then(|| Found { source_dir: name(&source), title: saved["manga"]["title"].as_str().map_or_else(|| name(&series), str::to_string), names, saved })
+        })
+        .collect();
+    found.sort_by_key(|f| f.title.to_lowercase());
+    found
+}
+
+/// Keeps the series' details and its downloaded chapters next to the files, so they can be browsed without the extension.
+fn remember(job: &Job) {
+    let Some(dir) = series_dir(&job.source, &job.title) else { return };
+    let path = dir.join(SIDECAR);
+    let mut saved: Value = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| json!({}));
+    saved["manga"] = job.manga.clone();
+    let chapters = saved["chapters"].as_array().cloned().unwrap_or_default();
+    let mut chapters: Vec<Value> = chapters.into_iter().filter(|c| c["url"] != job.chapter["url"]).collect();
+    chapters.push(job.chapter.clone());
+    saved["chapters"] = Value::Array(chapters);
+    let _ = std::fs::write(path, saved.to_string());
+}
+
+/// Clears the unpacked archives left by the last run.
+pub fn clear_scratch() {
+    let _ = std::fs::remove_dir_all(extract_root());
 }
 
 #[derive(Clone)]
 pub struct Job {
     pub source: Source,
     pub title: String,
+    pub manga: Value,
     pub chapter: Value,
 }
 
@@ -129,6 +270,7 @@ struct Shared(Entity<Downloads>);
 impl Global for Shared {}
 
 pub fn init(cx: &mut App) {
+    clear_scratch();
     let entity = cx.new(|_| Downloads { queue: VecDeque::new(), states: HashMap::new(), running: false, cancelled: HashSet::new() });
     cx.set_global(Shared(entity));
 }
@@ -228,7 +370,7 @@ async fn download(job: &Job, this: &gpui::WeakEntity<Downloads>, cx: &mut AsyncA
     let dir = series_dir(&job.source, &job.title).ok_or("No downloads folder")?;
     let name = chapter_name(&job.chapter);
     let done = dir.join(&name);
-    if done.is_dir() {
+    if done.is_dir() || chapter_names(&dir).contains(&name) {
         return Ok(());
     }
     let tmp = dir.join(format!("{name}{TMP}"));
@@ -271,7 +413,22 @@ async fn download(job: &Job, this: &gpui::WeakEntity<Downloads>, cx: &mut AsyncA
             cx.notify();
         });
     }
-    std::fs::rename(&tmp, &done).map_err(|e| e.to_string())
+    if CBZ.load(Ordering::Relaxed) {
+        let (part, archive) = (dir.join(format!("{name}.cbz.part")), dir.join(format!("{name}.cbz")));
+        let tmp = tmp.clone();
+        cx.background_executor()
+            .spawn(async move {
+                pack(&tmp, &part)?;
+                std::fs::rename(&part, &archive).map_err(|e| e.to_string())?;
+                let _ = std::fs::remove_dir_all(&tmp);
+                Ok::<_, String>(())
+            })
+            .await?;
+    } else {
+        std::fs::rename(&tmp, &done).map_err(|e| e.to_string())?;
+    }
+    remember(job);
+    Ok(())
 }
 
 impl gpui::Render for Downloads {
@@ -333,8 +490,8 @@ impl gpui::Render for Downloads {
                     .when(!empty, |d| d.child(button("cancel-all", "Cancel all").on_click(cx.listener(|this, _, _, cx| this.cancel_all(cx)))))
                     .child(button("open-folder", "Open folder").on_click(|_, _, cx| {
                         if let Some(dir) = dir() {
-                            let _ = std::fs::create_dir_all(dir);
-                            cx.open_with_system(dir);
+                            let _ = std::fs::create_dir_all(&dir);
+                            cx.open_with_system(&dir);
                         }
                     })),
             )
@@ -357,5 +514,21 @@ mod tests {
         assert_eq!(chapter_name(&json!({ "name": "Ch. 1", "scanlator": "Team" })), "Team_Ch. 1");
         assert_eq!(chapter_name(&json!({ "name": "Ch. 1", "scanlator": "" })), "Ch. 1");
         assert_eq!(chapter_name(&json!({ "name": " " })), "Chapter");
+    }
+
+    #[test]
+    fn archive_round_trips() {
+        let root = std::env::temp_dir().join(format!("nano-test-{}", std::process::id()));
+        let pages = root.join("pages");
+        std::fs::create_dir_all(&pages).unwrap();
+        std::fs::write(pages.join("002.jpg"), b"two").unwrap();
+        std::fs::write(pages.join("001.png"), b"one").unwrap();
+        let cbz = root.join("Ch. 1.cbz");
+        pack(&pages, &cbz).unwrap();
+        assert_eq!(chapter_names(&root), HashSet::from(["Ch. 1".to_string(), "pages".to_string()]));
+        let out = extract(&cbz).unwrap();
+        assert_eq!(out.iter().map(|p| std::fs::read(p).unwrap()).collect::<Vec<_>>(), vec![b"one".to_vec(), b"two".to_vec()]);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(extract_root());
     }
 }

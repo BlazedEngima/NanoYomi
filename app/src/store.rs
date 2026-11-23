@@ -269,6 +269,70 @@ pub struct Prefs {
     pub last_update_check: i64,
     #[serde(default)]
     pub dismissed_update: String,
+    #[serde(default)]
+    pub source_order: Vec<String>,
+    /// Empty means the default folder inside Nano's data.
+    #[serde(default)]
+    pub download_dir: String,
+    #[serde(default)]
+    pub download_format: crate::downloads::Format,
+    /// Where NSFW sources are hidden.
+    #[serde(default)]
+    pub nsfw: Nsfw,
+    /// Ids of the sources the repos flag as NSFW, remembered so they stay hidden after their extension is removed.
+    #[serde(default)]
+    pub nsfw_sources: Vec<String>,
+    /// Same, for sources in extensions that mix 18+ content in with the rest.
+    #[serde(default)]
+    pub mixed_sources: Vec<String>,
+    /// Categories marked NSFW, by their `order`.
+    #[serde(default)]
+    pub nsfw_categories: Vec<i64>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Area {
+    Library,
+    Updates,
+    History,
+    Downloaded,
+    Sources,
+    Extensions,
+}
+
+/// One switch per place NSFW can show up.
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Nsfw {
+    /// Hides everywhere, whatever the switches below say.
+    pub all: bool,
+    /// Counts sources from extensions that mix in 18+ content as NSFW too.
+    pub mixed: bool,
+    pub library: bool,
+    pub updates: bool,
+    pub history: bool,
+    pub downloaded: bool,
+    pub sources: bool,
+    pub extensions: bool,
+}
+
+impl Default for Nsfw {
+    fn default() -> Self {
+        Nsfw { all: false, mixed: true, library: false, updates: false, history: false, downloaded: false, sources: false, extensions: false }
+    }
+}
+
+impl Nsfw {
+    pub fn get(&self, area: Area) -> bool {
+        self.all || match area {
+            Area::Library => self.library,
+            Area::Updates => self.updates,
+            Area::History => self.history,
+            Area::Downloaded => self.downloaded,
+            Area::Sources => self.sources,
+            Area::Extensions => self.extensions,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -335,6 +399,24 @@ impl Store {
 
     pub fn get(&self, source: &str, url: &str) -> Option<&Series> {
         self.data.series.iter().find(|s| s.source == source && s.url() == url)
+    }
+
+    /// Whether series from this source stay out of `area`.
+    pub fn hides(&self, area: Area, source: &str) -> bool {
+        let p = &self.data.prefs;
+        p.nsfw.get(area) && (p.nsfw_sources.iter().any(|s| s == source) || (p.nsfw.mixed && p.mixed_sources.iter().any(|s| s == source)))
+    }
+
+    /// Whether a series stays out of `area`, because of its source or because it's in a category marked NSFW.
+    pub fn hides_series(&self, area: Area, s: &Series) -> bool {
+        let p = &self.data.prefs;
+        self.hides(area, &s.source) || (p.nsfw.get(area) && s.categories.iter().any(|c| p.nsfw_categories.contains(c)))
+    }
+
+    /// Whether the category's tab is left off the Library page.
+    pub fn hides_category(&self, order: i64) -> bool {
+        let p = &self.data.prefs;
+        p.nsfw.get(Area::Library) && p.nsfw_categories.contains(&order)
     }
 
     pub fn library(&self) -> Vec<&Series> {
@@ -495,6 +577,12 @@ impl Store {
     }
 
     pub fn remove_category(&mut self, order: i64, cx: &mut Context<Self>) {
+        self.drop_category(order);
+        self.save_soon(cx);
+        cx.notify();
+    }
+
+    fn drop_category(&mut self, order: i64) {
         if let Some(c) = self.data.categories.iter().find(|c| c.order == order) {
             self.data.deleted_categories.push(c.name.to_lowercase());
         }
@@ -502,9 +590,9 @@ impl Store {
         for s in &mut self.data.series {
             s.categories.retain(|o| *o != order);
         }
+        // A new category can reuse the number, so it must not inherit the NSFW mark.
+        self.data.prefs.nsfw_categories.retain(|o| *o != order);
         self.data.categories_changed = true;
-        self.save_soon(cx);
-        cx.notify();
     }
 
     fn renumber(&mut self, i: usize, to: i64) {
@@ -754,6 +842,19 @@ mod tests {
         assert_eq!(store.data.series[0].categories, [plan], "its series moved with it");
         assert_eq!(by("Done"), Some(3));
         assert!(store.categories_changed(), "the move gets sent");
+    }
+
+    #[test]
+    fn deleting_a_category_clears_its_nsfw_mark() {
+        let mut store = Store::load(std::env::temp_dir().join("nano-no-such-library.json"));
+        let cat = |name: &str, order: i64| Category { name: name.into(), order, flags: 0, uid: order, version: 1 };
+        store.data.categories = vec![cat("Reading", 1), cat("Spicy", 2)];
+        store.data.prefs.nsfw_categories = vec![2];
+        store.drop_category(2);
+        assert!(store.data.prefs.nsfw_categories.is_empty());
+        // The next category gets number 2 again and starts unmarked.
+        let order = store.data.categories.iter().map(|c| c.order).max().map_or(1, |o| o + 1);
+        assert!(!store.data.prefs.nsfw_categories.contains(&order));
     }
 
     #[test]

@@ -55,6 +55,7 @@ impl Root {
         let mut out: Vec<Entry> = store
             .library()
             .into_iter()
+            .filter(|s| !store.hides_series(crate::store::Area::Library, s))
             .filter(|s| hit(s.title()) || hit(&s.source_name))
             .map(|s| Entry {
                 group: "YOUR SERIES",

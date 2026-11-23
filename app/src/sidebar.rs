@@ -2,16 +2,18 @@
 
 use crate::store::SyncStatus;
 use crate::*;
-use gpui::{Animation, AnimationExt};
+use gpui::{Animation, AnimationExt, StyledImage};
 
 pub const WIDE: f32 = 232.;
 pub const NARROW: f32 = 64.;
 
 struct Tip(SharedString);
 
+struct Dragged(String);
+
 impl Render for Tip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().px(u(8.)).py(u(4.)).rounded(u(6.)).bg(rgb(SURFACE)).border_1().border_color(rgb(LINE)).text_size(u(12.)).child(self.0.clone())
+        div().px(u(8.)).py(u(4.)).rounded(u(6.)).bg(rgb(SURFACE)).border_1().border_color(rgb(LINE)).text_size(u(12.)).text_color(rgb(TEXT)).child(self.0.clone())
     }
 }
 
@@ -37,6 +39,19 @@ fn item(id: impl Into<gpui::ElementId>, short: AnyElement, label: SharedString, 
         .when(narrow, |d| d.tooltip(move |_, cx| cx.new(|_| Tip(tip.clone())).into()))
 }
 
+fn grip() -> impl IntoElement {
+    let dots = || div().flex().flex_col().gap(u(2.)).children((0..3).map(|_| div().size(u(2.)).rounded(u(1.)).bg(rgb(FAINT))));
+    div()
+        .flex_none()
+        .flex()
+        .gap(u(2.))
+        .cursor(gpui::CursorStyle::OpenHand)
+        .opacity(0.35)
+        .group_hover("source-row", |s| s.opacity(1.))
+        .child(dots())
+        .child(dots())
+}
+
 fn ja(text: &'static str, on: bool, narrow: bool) -> AnyElement {
     div()
         .font_family(CJK)
@@ -59,9 +74,18 @@ impl Root {
         cx.notify();
     }
 
-    pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let narrow = self.store.read(cx).prefs().sidebar_collapsed;
         let in_screen = self.migrate.is_none();
+        let sources = self.registry.read(cx).browsable(self.store.read(cx));
+        let icon_urls: std::collections::HashMap<String, String> = self.registry.read(cx).index.iter().flat_map(|i| i.iter()).map(|e| (e.pkg.clone(), e.icon_url.clone())).collect();
+        let icons: Vec<Option<std::sync::Arc<gpui::RenderImage>>> = sources
+            .iter()
+            .map(|s| {
+                let url = icon_urls.get(&s.pkg).filter(|u| !u.is_empty());
+                self.icons.get(&self.cache, Some(crate::covers::Fetch::Icon), url.map(String::as_str), |r: &mut Root| &mut r.icons, cx)
+            })
+            .collect();
         let nav = |tab: Tab, jp: &'static str, en: &'static str, cx: &mut Context<Self>| {
             let on = in_screen && self.tab == tab;
             item(en, ja(jp, on, narrow), en.into(), on, narrow).on_click(cx.listener(move |this, _, window, cx| this.show(tab, window, cx)))
@@ -69,16 +93,19 @@ impl Root {
 
         let browsing = in_screen && self.tab == Tab::Browse;
         let current = self.browse.read(cx).source_id().map(str::to_string);
-        let sources = self.registry.read(cx).browsable(self.store.read(cx));
+        let order: Vec<String> = sources.iter().map(|s| s.id.clone()).collect();
         let source_rows: Vec<_> = sources
             .into_iter()
-            .map(|s| {
+            .zip(icons)
+            .map(|(s, icon)| {
                 let on = browsing && current.as_deref() == Some(s.id.as_str());
                 let initial = s.name.chars().next().unwrap_or('?').to_uppercase().to_string();
-                let short = if narrow {
-                    div()
+                let short = match (narrow, icon) {
+                    (true, icon) => div()
+                        .flex_none()
                         .size(u(24.))
                         .rounded(u(12.))
+                        .overflow_hidden()
                         .border_1()
                         .border_color(rgb(if on { ACCENT } else { LINE }))
                         .flex()
@@ -87,17 +114,52 @@ impl Root {
                         .text_size(u(11.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(if on { TEXT } else { MUTED }))
-                        .child(initial)
-                        .into_any_element()
-                } else {
-                    div().flex_none().size(u(6.)).rounded(u(3.)).bg(rgb(if on { ACCENT } else { LINE })).into_any_element()
+                        .map(|d| match icon {
+                            Some(image) => d.child(gpui::img(image).size_full().object_fit(gpui::ObjectFit::Cover)),
+                            None => d.child(initial),
+                        })
+                        .into_any_element(),
+                    (false, Some(image)) => div()
+                        .flex_none()
+                        .size(u(18.))
+                        .rounded(u(4.))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(rgb(if on { ACCENT } else { LINE }))
+                        .child(gpui::img(image).size_full().object_fit(gpui::ObjectFit::Cover))
+                        .into_any_element(),
+                    (false, None) => div().flex_none().size(u(6.)).rounded(u(3.)).bg(rgb(if on { ACCENT } else { LINE })).into_any_element(),
                 };
                 let name = if s.lang.is_empty() || s.lang == "all" || s.lang == "en" { s.name.clone() } else { format!("{} · {}", s.name, s.lang) };
                 let id = s.id.clone();
-                item(SharedString::from(format!("side-{}", s.id)), short, name.into(), on, narrow).on_click(cx.listener(move |this, _, window, cx| {
-                    this.show(Tab::Browse, window, cx);
-                    this.browse.update(cx, |b, cx| b.select(&id, cx));
-                }))
+                let name: SharedString = name.into();
+                let (grab, target, ids) = (s.id.clone(), s.id.clone(), order.clone());
+                let (here, line) = (s.id.clone(), order.clone());
+                item(SharedString::from(format!("side-{}", s.id)), short, name.clone(), on, narrow)
+                    .group("source-row")
+                    .when(!narrow, |d| d.child(grip()))
+                    .on_drag(Dragged(grab), move |_, _, _, cx| cx.new(|_| Tip(name.clone())))
+                    .drag_over::<Dragged>(move |d, from, _, _| {
+                        let at = |id: &str| line.iter().position(|i| i == id);
+                        if from.0 == here {
+                            d
+                        } else if at(&from.0) < at(&here) {
+                            d.border_b_2().border_color(rgb(ACCENT))
+                        } else {
+                            d.border_t_2().border_color(rgb(ACCENT))
+                        }
+                    })
+                    .on_drop(cx.listener(move |this, from: &Dragged, _, cx| {
+                        let mut ids = ids.clone();
+                        let (Some(a), Some(b)) = (ids.iter().position(|i| *i == from.0), ids.iter().position(|i| *i == target)) else { return };
+                        let moved = ids.remove(a);
+                        ids.insert(b, moved);
+                        this.store.update(cx, |s, cx| s.edit_prefs(cx, |p| p.source_order = ids));
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.show(Tab::Browse, window, cx);
+                        this.browse.update(cx, |b, cx| b.select(&id, cx));
+                    }))
             })
             .collect();
 
@@ -190,7 +252,8 @@ impl Root {
                     .when(!narrow, |d| d.child(label("READING")))
                     .child(nav(Tab::Library, "書庫", "Library", cx))
                     .child(nav(Tab::Updates, "新着", "Updates", cx))
-                    .child(nav(Tab::History, "履歴", "History", cx)),
+                    .child(nav(Tab::History, "履歴", "History", cx))
+                    .child(nav(Tab::Saved, "取得", "Downloaded", cx)),
             )
             .when(source_rows.is_empty(), |d| d.child(div().flex_1()))
             .when(!source_rows.is_empty(), |d| {

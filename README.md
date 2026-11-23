@@ -26,23 +26,13 @@ Nano is a free and open source manga reader for the desktop. It runs the same ex
 
 ## Features
 
-Features of Nano include:
-* Mihon/Tachiyomi extensions from any repo you add, using the same address you'd give Mihon. Nano doesn't come with a repo. It remembers each repo's signing key when you add it and only runs jars signed with that key.
-* Every kind of search filter an extension offers: selects, checkboxes, include/exclude tags, groups and sort orders.
-* A library with what you're reading now, unread counts, and the latest chapters across your saved series.
-* Three reading modes: left to right, right to left (for manga), or vertical for webtoons. Set a default in Settings, and pressing V in the reader switches between paged and vertical.
-* A page scrubber with a dot per page, and a chapter list in the reader controls to jump to any chapter.
-* Per-series scanlator filters, and per-extension language choices for multi-language sources.
-* Migration to another source, as in Mihon. Reading progress carries over by chapter number. Series stay readable from what was saved even after their extension is removed.
-* History as a grid of covers, with the chapter and page you stopped at.
-* Cloudflare checks passed quietly in the built-in web engine, with a window to click only when a site insists. A FlareSolverr or Byparr you already run can be added in Settings.
-* Covers cached for a week and chapter pages cached up to a size you choose, so going back doesn't download them again.
-* Descriptions rendered from Markdown or HTML, with clickable links.
-* Backup and restore with Mihon's `.tachibk` files: export your library, categories, progress and tracking, or import a backup from your phone. Importing only adds to what's already there.
-* [SyncYomi](https://github.com/syncyomi/syncyomi) sync with Mihon forks on your phone (TachiyomiSY, Komikku), plus MyAnimeList and AniList tracking.
-* JPEG XL pages (used by some sources).
-* Support for the Android classes extensions lean on, such as image unscrambling, text pages, QuickJS scripts and ZIP/CBZ archives. All 1,700+ extensions in the Keiyoushi repo link against the host; whether a given source works still depends on the site.
-* Bounded memory: only pages near your reading position stay decoded, and the extension host's Java heap is sized to your machine (adjustable in Settings).
+* Runs Mihon and Tachiyomi extensions from any repo you add. Nano ships no repo, and only runs extensions signed with the key it saved when you added the repo.
+* A library with unread counts, the latest chapters and your history.
+* Left to right, right to left and vertical reading, with a page scrubber and chapter list.
+* Per-series scanlator filters and migration to another source.
+* Cloudflare checks passed in a built-in web engine.
+* Mihon `.tachibk` backup and restore, [SyncYomi](https://github.com/syncyomi/syncyomi) sync, and MyAnimeList and AniList tracking.
+* Bounded memory use, and a bundled Java runtime so there is nothing else to install.
 
 ## Download
 

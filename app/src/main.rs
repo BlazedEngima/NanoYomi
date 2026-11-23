@@ -20,6 +20,7 @@ mod palette;
 mod reader;
 mod registry;
 mod rich;
+mod saved;
 mod segmented;
 mod settings;
 mod sidebar;
@@ -324,6 +325,7 @@ enum Tab {
     Updates,
     Search,
     Downloads,
+    Saved,
     Browse,
     Extensions,
     History,
@@ -340,6 +342,7 @@ struct Root {
     global: Entity<global::GlobalSearch>,
     catalog: Option<Entity<Catalog>>,
     history: Option<Entity<History>>,
+    saved: Option<Entity<saved::Saved>>,
     settings: Option<Entity<settings::Settings>>,
     manga: Option<(Entity<MangaView>, Subscription)>,
     migrate: Option<(Entity<migrate::Migrate>, Subscription)>,
@@ -354,6 +357,8 @@ struct Root {
     /// Bumped each time the panel opens or closes, or the sidebar folds, so their slides start over.
     panel_moves: usize,
     sidebar_moves: usize,
+    /// Extension icons shown in the sidebar.
+    icons: covers::Covers,
     focus: gpui::FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -364,14 +369,18 @@ impl Root {
         let store = cx.new(|_| Store::load(data_dir.join("library.json")));
         sync::run(store.clone(), cx);
         set_zoom(store.read(cx).zoom());
+        downloads::apply(&store.read(cx).prefs().download_dir, store.read(cx).prefs().download_format);
         page_cache::set_cap_mb(store.read(cx).page_cache_mb());
         solver::set_url(store.read(cx).solver_url());
         set_sidebar_width(if store.read(cx).prefs().sidebar_collapsed { sidebar::NARROW } else { sidebar::WIDE });
         let registry = cx.new(|cx| Registry::new(host, data_dir.clone(), cx));
+        let repos = store.read(cx).repos().to_vec();
+        registry.update(cx, |r, cx| r.load_cached_index(repos, cx));
         let library = cx.new(|cx| Library::new(store.clone(), registry.clone(), cache.clone(), cx));
         let browse = cx.new(|cx| Browse::new(registry.clone(), store.clone(), cache.clone(), cx));
         let global = cx.new(|cx| global::GlobalSearch::new(registry.clone(), store.clone(), cache.clone(), cx));
         let subs = vec![
+            cx.observe(&registry, |this, _, cx| this.sync_nsfw(cx)),
             cx.subscribe_in(&browse, window, |this, _, ev: &OpenManga, window, cx| this.open_manga(ev, window, cx)),
             cx.subscribe_in(&global, window, |this, _, ev: &OpenManga, window, cx| this.open_manga(ev, window, cx)),
             cx.subscribe_in(&library, window, |this, _, ev: &OpenManga, window, cx| this.open_manga(ev, window, cx)),
@@ -412,7 +421,36 @@ impl Root {
             let (store, registry, cache) = (store.clone(), registry.clone(), cache.clone());
             cx.new(|cx| History::new(store, registry, cache, cx))
         });
-        Root { cache, store, registry, tab, library, browse, global, catalog, history, settings, manga: None, migrate: None, reader: None, palette: None, check: None, check_sub: None, banner, closing: None, panel_moves: 0, sidebar_moves: 0, focus, _subs: subs }
+        Root { cache, store, registry, tab, library, browse, global, catalog, history, saved: None, settings, manga: None, migrate: None, reader: None, palette: None, check: None, check_sub: None, banner, closing: None, panel_moves: 0, sidebar_moves: 0, icons: Default::default(), focus, _subs: subs }
+    }
+
+    /// Remembers which sources the repos flag as 18+, or as mixing 18+ in, so they can be hidden.
+    fn sync_nsfw(&mut self, cx: &mut Context<Self>) {
+        let (nsfw, mixed): (Vec<String>, Vec<String>) = {
+            let Some(index) = self.registry.read(cx).index.clone() else { return };
+            // Only sources in use: installed ones, and ones a saved series came from.
+            let mut used: std::collections::HashSet<String> = self.store.read(cx).all_series().iter().map(|s| s.source.clone()).collect();
+            used.extend(self.registry.read(cx).sources.iter().map(|s| s.id.clone()));
+            let ids = |flag: fn(&extensions::Ext) -> bool| -> Vec<String> {
+                index.iter().filter(|e| flag(e)).flat_map(|e| e.source_ids.iter()).filter(|id| used.contains(*id)).cloned().collect()
+            };
+            (ids(|e| e.nsfw), ids(|e| e.mixed))
+        };
+        let p = self.store.read(cx).prefs();
+        if nsfw.iter().all(|id| p.nsfw_sources.contains(id)) && mixed.iter().all(|id| p.mixed_sources.contains(id)) {
+            return;
+        }
+        self.store.update(cx, |s, cx| {
+            s.edit_prefs(cx, |p| {
+                for (known, new) in [(&mut p.nsfw_sources, nsfw), (&mut p.mixed_sources, mixed)] {
+                    for id in new {
+                        if !known.contains(&id) {
+                            known.push(id);
+                        }
+                    }
+                }
+            })
+        });
     }
 
     fn zoom_by(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -443,6 +481,16 @@ impl Root {
                 self._subs.push(cx.subscribe_in(&history, window, |this, _, ev: &OpenManga, window, cx| this.open_manga(ev, window, cx)));
                 self.history = Some(history);
             }
+            Tab::Saved => {
+                if let Some(saved) = &self.saved {
+                    saved.update(cx, |s, cx| s.rescan(cx));
+                } else {
+                    let (store, registry, cache) = (self.store.clone(), self.registry.clone(), self.cache.clone());
+                    let saved = cx.new(|cx| saved::Saved::new(store, registry, cache, cx));
+                    self._subs.push(cx.subscribe_in(&saved, window, |this, _, ev: &saved::OpenSaved, window, cx| this.open_saved(ev, window, cx)));
+                    self.saved = Some(saved);
+                }
+            }
             Tab::Settings if self.settings.is_none() => {
                 let store = self.store.clone();
                 self.settings = Some(cx.new(|cx| settings::Settings::new(store, cx)));
@@ -455,6 +503,16 @@ impl Root {
     fn open_manga(&mut self, ev: &OpenManga, window: &mut Window, cx: &mut Context<Self>) {
         let (source, manga, cache, store) = (ev.source.clone(), ev.manga.clone(), self.cache.clone(), self.store.clone());
         let view = cx.new(|cx| MangaView::new(source, cache, store, manga, cx));
+        self.attach_manga(view, window, cx);
+    }
+
+    fn open_saved(&mut self, ev: &saved::OpenSaved, window: &mut Window, cx: &mut Context<Self>) {
+        let (source, manga, chapters, cache, store) = (ev.source.clone(), ev.manga.clone(), ev.chapters.clone(), self.cache.clone(), self.store.clone());
+        let view = cx.new(|cx| MangaView::local(source, cache, store, manga, chapters, cx));
+        self.attach_manga(view, window, cx);
+    }
+
+    fn attach_manga(&mut self, view: Entity<MangaView>, window: &mut Window, cx: &mut Context<Self>) {
         let sub = cx.subscribe_in(&view, window, |this, view, ev: &MangaEvent, window, cx| match ev {
             MangaEvent::Back => this.close_manga(cx),
             MangaEvent::Read { chapters, index, page } => {
@@ -478,6 +536,9 @@ impl Root {
 
     fn close_manga(&mut self, cx: &mut Context<Self>) {
         let Some((view, _)) = self.manga.take() else { return };
+        if let Some(saved) = &self.saved {
+            saved.update(cx, |s, cx| s.rescan(cx));
+        }
         self.closing = Some(view);
         self.panel_moves += 1;
         let moves = self.panel_moves;
@@ -561,6 +622,7 @@ impl Root {
             Tab::Browse => self.browse.clone().into_any_element(),
             Tab::Search => self.global.clone().into_any_element(),
             Tab::Downloads => downloads::get(cx).into_any_element(),
+            Tab::Saved => self.saved.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
             Tab::Extensions => self.catalog.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
             Tab::History => self.history.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),
             Tab::Settings => self.settings.clone().map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()),

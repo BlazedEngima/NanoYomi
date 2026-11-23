@@ -134,6 +134,16 @@ impl Settings {
         .detach();
     }
 
+    fn pick_downloads(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Choose".into()) });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let _ = this.update(cx, |this, cx| set_downloads(&this.store, cx, |p| p.download_dir = path.display().to_string()));
+        })
+        .detach();
+    }
+
     fn import_backup(&mut self, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Import".into()) });
         cx.spawn(async move |this, cx| {
@@ -331,6 +341,107 @@ impl Render for Settings {
                     ))),
             )
             .child(div().flex_none().flex().gap(u(6.)).child(auto_chip("auto-off", "Off", false, self.store.clone())).child(auto_chip("auto-on", "On", true, self.store.clone())));
+        let (custom, format) = { let p = self.store.read(cx).prefs(); (!p.download_dir.is_empty(), p.download_format) };
+        let format_chip = |id: &'static str, label: &'static str, value: crate::downloads::Format, store: Entity<Store>| {
+            small_button(id, label, format == value).on_click(move |_, _, cx| set_downloads(&store, cx, |p| p.download_format = value))
+        };
+        let row = |title: &'static str, note: String, controls: gpui::Div| {
+            div()
+                .w_full()
+                .py(u(14.))
+                .border_b_1()
+                .border_color(rgb(RULE))
+                .flex()
+                .items_center()
+                .gap_4()
+                .child(div().flex_1().min_w_0().flex().flex_col().gap(u(4.)).child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child(title)).child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(note)))
+                .child(controls.flex_none().flex().gap(u(6.)))
+        };
+        let location = row(
+            "Downloads folder",
+            format!("{folder}. Chapters already downloaded stay where they are."),
+            div()
+                .child(small_button("folder-change", "Change", false).on_click(cx.listener(|this, _, _, cx| this.pick_downloads(cx))))
+                .children(custom.then(|| small_button("folder-reset", "Default", false).on_click({ let store = self.store.clone(); move |_, _, cx| set_downloads(&store, cx, |p| p.download_dir.clear()) }))),
+        );
+        let kind = row(
+            "Download format",
+            "Pages is a folder of images, as Mihon keeps them. CBZ is one archive per chapter. Applies to new downloads, and both read the same.".into(),
+            div().child(format_chip("format-pages", "Pages", crate::downloads::Format::Pages, self.store.clone())).child(format_chip("format-cbz", "CBZ", crate::downloads::Format::Cbz, self.store.clone())),
+        );
+        let nsfw = self.store.read(cx).prefs().nsfw;
+        let toggle = |id: &'static str, title: &'static str, note: &'static str, on: bool, locked: bool, nested: bool, flip: fn(&mut crate::store::Nsfw), store: Entity<Store>| {
+            let row = checkbox(id, title, note, on, locked, nested);
+            if locked { row } else { row.on_click(move |_, _, cx| store.update(cx, |s, cx| s.edit_prefs(cx, |p| flip(&mut p.nsfw)))) }
+        };
+        let parts: [(&'static str, &'static str, &'static str, crate::store::Area, fn(&mut crate::store::Nsfw)); 6] = [
+            ("nsfw-library", "Library", "", crate::store::Area::Library, |n| n.library = !n.library),
+            ("nsfw-updates", "Updates", "", crate::store::Area::Updates, |n| n.updates = !n.updates),
+            ("nsfw-history", "History", "and Continue reading", crate::store::Area::History, |n| n.history = !n.history),
+            ("nsfw-downloaded", "Downloaded", "", crate::store::Area::Downloaded, |n| n.downloaded = !n.downloaded),
+            ("nsfw-sources", "Sources", "sidebar, Browse, search and palette", crate::store::Area::Sources, |n| n.sources = !n.sources),
+            ("nsfw-extensions", "Installed extensions", "", crate::store::Area::Extensions, |n| n.extensions = !n.extensions),
+        ];
+        let nsfw_rows = div()
+            .w_full()
+            .py(u(10.))
+            .border_t_1()
+            .border_b_1()
+            .border_color(rgb(RULE))
+            .flex()
+            .flex_col()
+            .child(toggle("nsfw-all", "Hide all NSFW", "Everything from sources the extension repos flag as 18+, in every place below.", nsfw.all, false, false, |n| n.all = !n.all, self.store.clone()))
+            .child(
+                div()
+                    .ml(u(9.))
+                    .mb(u(6.))
+                    .pl(u(20.))
+                    .border_l_1()
+                    .border_color(rgb(RULE))
+                    .flex()
+                    .flex_col()
+                    .children(parts.map(|(id, title, note, area, flip)| toggle(id, title, note, nsfw.get(area), nsfw.all, true, flip, self.store.clone()))),
+            )
+            .child(
+                div().mt(u(4.)).pt(u(10.)).border_t_1().border_color(rgb(RULE)).child(toggle(
+                    "nsfw-mixed",
+                    "Include mixed sources",
+                    "Extensions that offer 18+ sources next to regular ones, like MangaDex, can't be split, so the whole extension counts.",
+                    nsfw.mixed,
+                    false,
+                    false,
+                    |n| n.mixed = !n.mixed,
+                    self.store.clone(),
+                )),
+            );
+        let marked = self.store.read(cx).prefs().nsfw_categories.clone();
+        let cat_list = self.store.read(cx).categories();
+        let category_rows: Vec<_> = cat_list
+            .iter()
+            .map(|c| {
+                let (order, on, store) = (c.order, marked.contains(&c.order), self.store.clone());
+                small_button(("nsfw-category", order as usize), c.name.clone(), on).when(on, |d| d.border_color(rgb(crate::ACCENT))).on_click(move |_, _, cx| {
+                    store.update(cx, |s, cx| {
+                        s.edit_prefs(cx, |p| match p.nsfw_categories.iter().position(|o| *o == order) {
+                            Some(i) => _ = p.nsfw_categories.remove(i),
+                            None => p.nsfw_categories.push(order),
+                        })
+                    })
+                })
+            })
+            .collect();
+        let nsfw_categories = div()
+            .w_full()
+            .py(u(10.))
+            .border_b_1()
+            .border_color(rgb(RULE))
+            .flex()
+            .flex_col()
+            .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child("NSFW categories"))
+            .child(div().pt(u(2.)).pb(u(10.)).text_size(u(13.)).text_color(rgb(MUTED)).child("Series in a highlighted category are hidden wherever the options above hide NSFW, and the category's tab leaves the Library."))
+            .child(div().flex().flex_wrap().gap(u(8.)).children(category_rows))
+            .children(cat_list.is_empty().then(|| div().text_size(u(13.)).text_color(rgb(FAINT)).child("No categories yet.")));
+        let nsfw_note = div().pt(u(8.)).text_size(u(13.)).text_color(rgb(MUTED)).child("Based on the content warning each extension repo gives its extensions. A source the repo doesn't flag isn't hidden.");
         let prefs = self.store.read(cx).prefs();
         let current = (prefs.vertical_reader, prefs.right_to_left && !prefs.vertical_reader);
         let mode_chip = |id: &'static str, label: &'static str, value: (bool, bool), store: Entity<Store>| {
@@ -742,6 +853,12 @@ impl Render for Settings {
             .child(categories)
             .child(div().pt(u(24.)).pb(u(10.)).font_family(crate::fonts::mono()).text_size(u(11.)).text_color(rgb(FAINT)).child("DOWNLOADS"))
             .child(downloads)
+            .child(location)
+            .child(kind)
+            .child(div().pt(u(24.)).pb(u(10.)).font_family(crate::fonts::mono()).text_size(u(11.)).text_color(rgb(FAINT)).child("NSFW"))
+            .child(nsfw_rows)
+            .child(nsfw_categories)
+            .child(nsfw_note)
             .child(div().pt(u(24.)).pb(u(10.)).font_family(crate::fonts::mono()).text_size(u(11.)).text_color(rgb(FAINT)).child("TRACKING"))
             .child(tracking)
             .child(div().pt(u(24.)).pb(u(10.)).font_family(crate::fonts::mono()).text_size(u(11.)).text_color(rgb(FAINT)).child("SYNC"))
@@ -782,4 +899,57 @@ impl Render for Settings {
             .child(div().pt(u(24.)).pb(u(10.)).font_family(crate::fonts::mono()).text_size(u(11.)).text_color(rgb(FAINT)).child("MEMORY"))
             .child(heap)
     }
+}
+
+/// Saves a download setting and applies it to the queue straight away.
+fn set_downloads(store: &Entity<Store>, cx: &mut gpui::App, f: impl FnOnce(&mut crate::store::Prefs)) {
+    store.update(cx, |s, cx| s.edit_prefs(cx, f));
+    let prefs = store.read(cx).prefs();
+    crate::downloads::apply(&prefs.download_dir, prefs.download_format);
+}
+
+/// A checkbox row. A nested one is a compact line with its note beside the title. A locked one shows its state greyed out and can't be changed.
+fn checkbox(id: impl Into<gpui::ElementId>, title: impl Into<gpui::SharedString>, note: &'static str, on: bool, locked: bool, nested: bool) -> gpui::Stateful<gpui::Div> {
+    let line = u(22.);
+    let title: gpui::SharedString = title.into();
+    div()
+        .id(id)
+        .py(u(if nested { 5. } else { 6. }))
+        .flex()
+        .items_start()
+        .gap(u(12.))
+        .when(locked, |d| d.opacity(0.45))
+        .when(!locked, |d| d.cursor_pointer())
+        .child(
+            div().flex_none().h(line).flex().items_center().child(
+                div()
+                    .size(u(18.))
+                    .rounded(u(5.))
+                    .border_1()
+                    .border_color(rgb(if on { crate::ACCENT } else { MUTED }))
+                    .when(on, |d| d.bg(rgb(crate::ACCENT)))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(on, |d| d.child(crate::check(13., crate::BG))),
+            ),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(u(1.))
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap(u(10.))
+                        .line_height(line)
+                        .child(div().text_size(u(if nested { 14. } else { 15. })).font_weight(if nested { FontWeight::MEDIUM } else { FontWeight::SEMIBOLD }).child(title))
+                        .when(nested && !note.is_empty(), |d| d.child(div().min_w_0().truncate().text_size(u(12.5)).text_color(rgb(FAINT)).child(note))),
+                )
+                .when(!nested && !note.is_empty(), |d| d.child(div().text_size(u(13.)).text_color(rgb(MUTED)).child(note))),
+        )
 }
