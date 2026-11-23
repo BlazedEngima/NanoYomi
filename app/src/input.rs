@@ -4,10 +4,10 @@
 use crate::u;
 use crate::{FAINT, LINE, TEXT, ACCENT};
 use gpui::{
-    ClickEvent, Context, EventEmitter, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    Animation, AnimationExt, ClickEvent, Context, EventEmitter, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     ParentElement, Pixels, Render, ShapedLine, SharedString, StatefulInteractiveElement, Styled, TextRun, Window, canvas, div, rgb,
 };
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 pub enum InputEvent {
     Submit,
@@ -21,6 +21,7 @@ pub struct TextInput {
     pub numeric: bool,
     pub compact: bool,
     back: usize,
+    pulse: usize,
     shaped: Rc<RefCell<Option<(Pixels, ShapedLine)>>>,
 }
 
@@ -28,7 +29,7 @@ impl EventEmitter<InputEvent> for TextInput {}
 
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
-        TextInput { focus: cx.focus_handle(), text: String::new(), placeholder: placeholder.into(), icon: true, numeric: false, compact: false, back: 0, shaped: Rc::default() }
+        TextInput { focus: cx.focus_handle(), text: String::new(), placeholder: placeholder.into(), icon: true, numeric: false, compact: false, back: 0, pulse: 0, shaped: Rc::default() }
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -93,6 +94,7 @@ impl TextInput {
             },
             _ => return,
         }
+        self.pulse += 1;
         cx.stop_propagation();
         cx.notify();
     }
@@ -110,6 +112,7 @@ impl Render for TextInput {
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                 let at = this.shaped.borrow().as_ref().map(|(left, line)| line.closest_index_for_x(ev.position.x - *left));
                 this.back = at.filter(|&i| this.text.is_char_boundary(i)).map_or(0, |i| this.text[i..].chars().count());
+                this.pulse += 1;
                 cx.notify();
             }))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.focus(window, cx)))
@@ -125,7 +128,10 @@ impl Render for TextInput {
             .cursor_text()
             .children(self.icon.then(crate::search_icon))
             .child({
-                let caret = || div().flex_none().w(u(2.)).h(u(18.)).bg(rgb(ACCENT));
+                let pulse = self.pulse;
+                let caret = move || {
+                    div().flex_none().w(u(2.)).h(u(18.)).bg(rgb(ACCENT)).with_animation(("caret", pulse), Animation::new(Duration::from_millis(1000)).repeat(), |d, t| d.opacity(if t < 0.5 { 1. } else { 0. }))
+                };
                 let empty = self.text.is_empty();
                 let (shaped, text) = (self.shaped.clone(), SharedString::from(self.text.clone()));
                 let measure = canvas(|_, _, _| (), move |bounds, _, window, _| {
