@@ -26,6 +26,7 @@ mod sidebar;
 mod solver;
 mod store;
 mod sync;
+mod titlebar;
 mod track;
 mod tracking;
 mod update;
@@ -40,7 +41,7 @@ use store::Store;
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AppContext, AsyncApp, Bounds, Context, Entity, FontWeight, InteractiveElement, IntoElement,
     ParentElement, Render, RenderImage, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::FluentBuilder, px, rgb, size,
+    Window, WindowBounds, WindowOptions, div, prelude::FluentBuilder, px, rgb, size,
 };
 use host::{Host, HostError};
 use images::ImageCache;
@@ -95,7 +96,7 @@ static PANEL: AtomicU32 = AtomicU32::new(0);
 /// The window's width minus the sidebar and the series panel, as they are this frame, for sizing grids.
 pub fn content_width(window: &Window) -> f32 {
     let taken = f32::from_bits(SIDEBAR.load(Ordering::Relaxed)) + f32::from_bits(PANEL.load(Ordering::Relaxed));
-    f32::from(window.viewport_size().width) - taken * zoom()
+    f32::from(titlebar::viewport(window).width) - taken * zoom()
 }
 
 /// How long the sidebar and series panel take to slide.
@@ -103,7 +104,7 @@ pub const SLIDE: std::time::Duration = std::time::Duration::from_millis(240);
 
 struct Assets;
 
-const ICONS: [(&str, &[u8]); 7] = [
+const ICONS: [(&str, &[u8]); 11] = [
     ("icons/search.svg", include_bytes!("../assets/icons/search.svg")),
     ("icons/chevron.svg", include_bytes!("../assets/icons/chevron.svg")),
     ("icons/bookmark.svg", include_bytes!("../assets/icons/bookmark.svg")),
@@ -111,6 +112,10 @@ const ICONS: [(&str, &[u8]); 7] = [
     ("icons/check.svg", include_bytes!("../assets/icons/check.svg")),
     ("icons/sidebar.svg", include_bytes!("../assets/icons/sidebar.svg")),
     ("icons/download.svg", include_bytes!("../assets/icons/download.svg")),
+    ("icons/win-min.svg", include_bytes!("../assets/icons/win-min.svg")),
+    ("icons/win-max.svg", include_bytes!("../assets/icons/win-max.svg")),
+    ("icons/win-restore.svg", include_bytes!("../assets/icons/win-restore.svg")),
+    ("icons/win-close.svg", include_bytes!("../assets/icons/win-close.svg")),
 ];
 
 impl gpui::AssetSource for Assets {
@@ -538,6 +543,13 @@ impl Root {
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let page = self.page(window, cx);
+        titlebar::wrap(page, window)
+    }
+}
+
+impl Root {
+    fn page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         window.set_rem_size(u(16.));
         let root = div().relative().size_full().flex().bg(rgb(BG)).text_color(rgb(TEXT)).font_family(fonts::sans()).text_size(u(14.));
         if let Some((reader, _)) = &self.reader {
@@ -680,10 +692,12 @@ fn main() {
         }
 
         let bounds = Bounds::centered(None, size(px(1280.), px(860.)), cx);
+        let (titlebar, decorations) = titlebar::options();
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions { title: Some("Nano".into()), ..Default::default() }),
+                titlebar: Some(titlebar),
+                window_decorations: decorations,
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| Root::new(host, data_dir, window, cx)),

@@ -42,12 +42,11 @@ pub struct Check {
     _sub: Subscription,
 }
 
-/// WebKit has to say it's Safari, or Cloudflare rejects the tick. WebView2 can use the extension's own agent.
-pub fn browser_user_agent(extension_agent: String) -> String {
+pub fn browser_user_agent(_extension_agent: String) -> String {
     if cfg!(target_os = "macos") {
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Safari/605.1.15".into()
     } else {
-        extension_agent
+        String::new()
     }
 }
 
@@ -70,7 +69,7 @@ pub fn browse(cx: &mut App, host: Arc<Host>, url: String, user_agent: String) {
 fn open(cx: &mut App, host: Arc<Host>, url: String, user_agent: String, title: &'static str, mode: Mode) {
     let Some(main) = main_window(cx) else { return };
     let _ = main.update(cx, |root, window, cx| {
-        let mut builder = crate::webviews::builder().with_url(&url).with_bounds(rect(window.viewport_size()));
+        let mut builder = crate::webviews::builder().with_url(&url).with_bounds(rect(crate::titlebar::viewport(window)));
         if !user_agent.is_empty() {
             builder = builder.with_user_agent(&user_agent);
         }
@@ -113,6 +112,7 @@ impl Check {
             let started = std::time::Instant::now();
             // Two passing checks in a row count as solved.
             let passed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let agent = Arc::new(std::sync::Mutex::new(user_agent.clone()));
             let mut clear_ticks = 0;
             let mut shown = sign_in;
             let mut last = Vec::new();
@@ -173,7 +173,15 @@ impl Check {
                 // Solved when a new clearance shows up, or the page stops being a challenge.
                 clear_ticks = if passed.swap(false, Ordering::Relaxed) { clear_ticks + 1 } else { 0 };
                 let p = passed.clone();
+                let own_agent = user_agent.is_empty().then(|| agent.clone());
                 let _ = this.update(cx, |this: &mut Check, _| {
+                    if let Some(agent) = own_agent {
+                        let _ = this.webview.evaluate_script_with_callback("navigator.userAgent", move |r| {
+                            if let Ok(ua) = serde_json::from_str::<String>(&r) {
+                                *agent.lock().unwrap() = ua;
+                            }
+                        });
+                    }
                     this.webview.evaluate_script_with_callback(PAGE_PASSED_JS, move |r| {
                         if r == "true" {
                             p.store(true, Ordering::Relaxed);
@@ -183,11 +191,15 @@ impl Check {
                 if !old.iter().any(|v| !stale.contains(v)) && clear_ticks < 2 {
                     continue;
                 }
+                let passed_agent = agent.lock().unwrap().clone();
+                if passed_agent.is_empty() {
+                    continue;
+                }
                 // The full Set-Cookie form, which the host parses.
                 let header_values = cookies.iter().map(|c| c.to_string()).collect();
                 let ok = host.set_cookies(&url, header_values).await.is_ok()
                     // The webview passed with this agent, so the host keeps using it for the site.
-                    && host.call("setUserAgent", serde_json::json!({ "url": url, "userAgent": user_agent })).await.is_ok();
+                    && host.call("setUserAgent", serde_json::json!({ "url": url, "userAgent": passed_agent })).await.is_ok();
                 if let Some(tx) = tx.take() {
                     let _ = tx.send(ok);
                 }
@@ -197,8 +209,9 @@ impl Check {
             // Closing the panel ends a sign-in, so hand over its cookies.
             let header_values = last.iter().map(|c| c.to_string()).collect();
             let _ = host.set_cookies(&url, header_values).await;
-            if !user_agent.is_empty() {
-                let _ = host.call("setUserAgent", serde_json::json!({ "url": url, "userAgent": user_agent })).await;
+            let signed_in_agent = agent.lock().unwrap().clone();
+            if !signed_in_agent.is_empty() {
+                let _ = host.call("setUserAgent", serde_json::json!({ "url": url, "userAgent": signed_in_agent })).await;
             }
         })
         .detach();
@@ -219,11 +232,11 @@ fn panel(viewport: Size<Pixels>) -> (f32, f32, f32, f32) {
 impl Render for Check {
     #[allow(refining_impl_trait)]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let viewport = window.viewport_size();
-        let (x, y, w, h) = panel(viewport);
+        let (x, y, w, h) = panel(crate::titlebar::viewport(window));
+        let (left, top) = crate::titlebar::origin(window);
         let head = f32::from(u(56.));
         if self.shown {
-            let _ = self.webview.set_bounds(bounds(x, y + head, w, h - head));
+            let _ = self.webview.set_bounds(bounds(left + x, top + y + head, w, h - head));
         } else {
             // Off to the side at full size so the page lays out normally.
             let _ = self.webview.set_bounds(bounds(-10000., 0., w, h - head));
