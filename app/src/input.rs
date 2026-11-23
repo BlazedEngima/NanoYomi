@@ -32,7 +32,7 @@ impl TextInput {
         self.focus.focus(window, cx);
     }
 
-    fn on_key(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
         match (k.key.as_str(), k.modifiers.platform || k.modifiers.control) {
             ("backspace", true) => self.text.clear(),
@@ -48,7 +48,14 @@ impl TextInput {
                 }
             }
             (_, false) => match &k.key_char {
-                Some(ch) if !ch.chars().any(char::is_control) && (!self.numeric || ch.chars().all(|c| c.is_ascii_digit())) => self.text.push_str(ch),
+                Some(ch) if !ch.chars().any(char::is_control) && (!self.numeric || ch.chars().all(|c| c.is_ascii_digit())) => {
+                    let flip = cfg!(target_os = "macos") && window.capslock().on && ch.chars().count() == 1 && ch.chars().all(char::is_alphabetic);
+                    if flip {
+                        self.text.extend(ch.chars().flat_map(|c| if c.is_uppercase() { c.to_lowercase().collect::<Vec<_>>() } else { c.to_uppercase().collect() }));
+                    } else {
+                        self.text.push_str(ch);
+                    }
+                }
                 _ => return,
             },
             _ => return,
