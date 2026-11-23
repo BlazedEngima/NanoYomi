@@ -1,6 +1,7 @@
 //! Recently read series as covers, with the chapter and page you stopped at.
 
 use crate::u;
+use crate::browse::OpenManga;
 use crate::covers::{CARD_H, CARD_W, Covers, Fetch, cover, grid};
 use crate::images::ImageCache;
 use crate::library::Resume;
@@ -29,6 +30,7 @@ pub struct History {
 }
 
 impl EventEmitter<Resume> for History {}
+impl EventEmitter<OpenManga> for History {}
 
 impl History {
     pub fn new(store: Entity<Store>, registry: Entity<Registry>, cache: Entity<ImageCache>, cx: &mut Context<Self>) -> Self {
@@ -51,7 +53,22 @@ impl History {
             .gap(u(4.))
             .cursor_pointer()
             .child(div().mb(u(4.)).child(cover(image, s.title(), w, w * CARD_H / CARD_W, 0)))
-            .child(div().text_size(u(13.5)).font_weight(FontWeight::SEMIBOLD).truncate().child(s.title().to_string()))
+            .child(
+                div()
+                    .id(("history-title", i))
+                    .self_start()
+                    .max_w_full()
+                    .text_size(u(13.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .truncate()
+                    .child(s.title().to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let s = &this.rows[i];
+                        let source = this.registry.read(cx).source_or_saved(&s.source, &s.source_name);
+                        cx.emit(OpenManga { source, manga: s.manga.clone() });
+                        cx.stop_propagation();
+                    })),
+            )
             .child(div().text_size(u(13.)).text_color(rgb(0xC9C1B3)).truncate().child(p.chapter_name.clone()))
             .child(
                 div()
