@@ -349,7 +349,16 @@ impl Library {
                 .bg(rgb(SURFACE))
                 .cursor_pointer()
                 .hover(|d| d.bg(rgb(crate::HOVER)))
-                .child(div().flex_none().child(cover(image, s.title(), 74., 106., 0)))
+                .child(
+                    div()
+                        .id(("shelf-cover", ix))
+                        .flex_none()
+                        .child(cover(image, s.title(), 74., 106., 0))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open(ix, cx);
+                            cx.stop_propagation();
+                        })),
+                )
                 .child(
                     div()
                         .flex_1()
@@ -357,7 +366,20 @@ impl Library {
                         .flex()
                         .flex_col()
                         .gap(u(5.))
-                        .child(div().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).truncate().child(s.title().to_string()))
+                        .child(
+                            div()
+                                .id(("shelf-title", ix))
+                                .self_start()
+                                .max_w_full()
+                                .text_size(u(15.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .truncate()
+                                .child(s.title().to_string())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open(ix, cx);
+                                    cx.stop_propagation();
+                                })),
+                        )
                         .child(div().text_size(u(13.)).text_color(rgb(MUTED)).truncate().child(format!("{} · page {} of {}", p.chapter_name, p.page + 1, p.pages)))
                         .child(div().flex_1())
                         .child(div().h(u(3.)).rounded(u(2.)).bg(rgb(LINE)).child(div().h_full().rounded(u(2.)).w(relative(page)).bg(rgb(ACCENT))))

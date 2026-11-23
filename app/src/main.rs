@@ -435,6 +435,7 @@ impl Root {
                 let (store, registry, cache) = (self.store.clone(), self.registry.clone(), self.cache.clone());
                 let history = cx.new(|cx| History::new(store, registry, cache, cx));
                 self._subs.push(cx.subscribe_in(&history, window, |this, _, ev: &Resume, window, cx| this.resume(ev, window, cx)));
+                self._subs.push(cx.subscribe_in(&history, window, |this, _, ev: &OpenManga, window, cx| this.open_manga(ev, window, cx)));
                 self.history = Some(history);
             }
             Tab::Settings if self.settings.is_none() => {
