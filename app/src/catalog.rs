@@ -21,8 +21,14 @@ const GAP: f32 = 16.;
 const CARD_MIN: f32 = 300.;
 
 #[derive(Clone, Copy)]
+enum Section {
+    Installed,
+    Available,
+}
+
+#[derive(Clone, Copy)]
 enum Item {
-    Label(&'static str),
+    Label(Section),
     Installed(usize),
     Row(usize),
     Empty,
@@ -44,6 +50,8 @@ pub struct Catalog {
     items: Vec<Item>,
     installed: Vec<Ext>,
     available: Vec<Ext>,
+    installed_open: bool,
+    available_open: bool,
     cols: usize,
     card_w: f32,
     lang: Option<String>,
@@ -84,6 +92,8 @@ impl Catalog {
             items: vec![],
             installed: vec![],
             available: vec![],
+            installed_open: true,
+            available_open: true,
             cols: 1,
             card_w: CARD_MIN,
             lang: None,
@@ -351,9 +361,37 @@ impl Catalog {
 
     fn item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         match self.items.get(ix).copied() {
-            Some(Item::Label(text)) => {
-                let text = if text == "AVAILABLE" { format!("AVAILABLE · {}", self.available.len()) } else { text.to_string() };
-                div().px(u(PAD)).pt(u(24.)).pb(u(10.)).font_family(crate::fonts::mono()).text_size(u(11.)).text_color(rgb(FAINT)).child(text).into_any_element()
+            Some(Item::Label(section)) => {
+                let (name, count, open) = match section {
+                    Section::Installed => ("INSTALLED", self.installed.len(), self.installed_open),
+                    Section::Available => ("AVAILABLE", self.available.len(), self.available_open),
+                };
+                div()
+                    .id(name)
+                    .px(u(PAD))
+                    .pt(u(24.))
+                    .pb(u(10.))
+                    .flex()
+                    .items_center()
+                    .gap(u(6.))
+                    .cursor_pointer()
+                    .child(
+                        gpui::svg()
+                            .path("icons/chevron.svg")
+                            .flex_none()
+                            .size(u(14.))
+                            .text_color(rgb(FAINT))
+                            .when(!open, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(-std::f32::consts::FRAC_PI_2)))),
+                    )
+                    .child(div().font_family(crate::fonts::mono()).text_size(u(11.)).text_color(rgb(FAINT)).child(format!("{name} · {count}")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        match section {
+                            Section::Installed => this.installed_open = !this.installed_open,
+                            Section::Available => this.available_open = !this.available_open,
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element()
             }
             Some(Item::Installed(i)) => self.installed_row(i, cx),
             Some(Item::Row(r)) => {
@@ -454,14 +492,18 @@ impl Render for Catalog {
 
         let mut items = vec![];
         if !self.installed.is_empty() {
-            items.push(Item::Label("INSTALLED"));
-            items.extend((0..self.installed.len()).map(Item::Installed));
+            items.push(Item::Label(Section::Installed));
+            if self.installed_open {
+                items.extend((0..self.installed.len()).map(Item::Installed));
+            }
         }
-        items.push(Item::Label("AVAILABLE"));
-        if self.available.is_empty() {
-            items.push(Item::Empty);
+        items.push(Item::Label(Section::Available));
+        if self.available_open {
+            if self.available.is_empty() {
+                items.push(Item::Empty);
+            }
+            items.extend((0..self.available.len().div_ceil(self.cols)).map(Item::Row));
         }
-        items.extend((0..self.available.len().div_ceil(self.cols)).map(Item::Row));
         if items.len() != self.list.item_count() {
             self.list.reset(items.len());
         }
