@@ -8,9 +8,10 @@ use crate::input::{InputEvent, TextInput};
 use crate::store::{Store, default_hidden, now_ms, scanlator_counts, visible_chapters};
 use crate::{ACCENT_TEXT, BODY, FAINT, LINE, MUTED, RULE, SURFACE, Source, TEXT, heading, pill};
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement, ListAlignment,
-    ListState, ObjectFit, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, StyledImage,
-    Subscription, Window, div, img, list, prelude::FluentBuilder, relative, rgb,
+    AnyElement, App, AppContext, Bounds, Context, Corners, Entity, EventEmitter, FocusHandle, FontWeight, Hsla, InteractiveElement,
+    IntoElement, KeyDownEvent, ListAlignment, ListState, ObjectFit, ParentElement, Point, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, StyledImage, Subscription, Window, canvas, div, fill, img, list, point, prelude::FluentBuilder,
+    px, relative, rgb, size,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -65,6 +66,11 @@ pub struct MangaView {
     /// The categories menu, and when it last closed so the click that closed it doesn't reopen it.
     cat_menu: bool,
     cat_closed: Option<std::time::Instant>,
+    cat_scroll: ScrollHandle,
+    cat_focus: FocusHandle,
+    cat_prev: Option<FocusHandle>,
+    cat_typed: String,
+    cat_typed_at: Option<std::time::Instant>,
     /// The chapter whose actions menu is open, and where.
     row_menu: Option<(usize, gpui::Point<gpui::Pixels>)>,
     /// The trackers drawer, over the panel while open.
@@ -145,6 +151,11 @@ impl MangaView {
             row_menu: None,
             cat_menu: false,
             cat_closed: None,
+            cat_scroll: ScrollHandle::new(),
+            cat_focus: cx.focus_handle(),
+            cat_prev: None,
+            cat_typed: String::new(),
+            cat_typed_at: None,
             downloaded,
             tracking: None,
             status: status.into(),
@@ -244,6 +255,58 @@ impl MangaView {
         self.visible[i]["url"].as_str().unwrap_or_default().to_string()
     }
 
+    fn open_cats(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cat_menu = true;
+        self.cat_prev = window.focused(cx);
+        self.cat_typed.clear();
+        self.cat_scroll.set_offset(Point::default());
+        window.focus(&self.cat_focus, cx);
+        cx.notify();
+    }
+
+    fn close_cats(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.cat_menu {
+            return;
+        }
+        self.cat_menu = false;
+        match self.cat_prev.take() {
+            Some(prev) => window.focus(&prev, cx),
+            None => window.blur(cx),
+        }
+        cx.notify();
+    }
+
+    fn on_cat_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let k = &ev.keystroke;
+        if k.key == "escape" {
+            self.close_cats(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if k.modifiers.platform || k.modifiers.control || k.modifiers.alt {
+            return;
+        }
+        if self.cat_typed_at.is_none_or(|t| t.elapsed() > std::time::Duration::from_millis(1500)) {
+            self.cat_typed.clear();
+        }
+        match (k.key.as_str(), &k.key_char) {
+            ("backspace", _) => {
+                self.cat_typed.pop();
+            }
+            (_, Some(ch)) if !ch.chars().any(char::is_control) => self.cat_typed.push_str(&ch.to_lowercase()),
+            _ => return,
+        }
+        self.cat_typed_at = Some(std::time::Instant::now());
+        if !self.cat_typed.is_empty() {
+            let at = self.store.read(cx).categories().iter().position(|c| c.name.to_lowercase().starts_with(&self.cat_typed));
+            if let Some(i) = at {
+                self.cat_scroll.scroll_to_top_of_item(i);
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     fn categories_button(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let all = self.store.read(cx).categories();
         let mine = self.store.read(cx).get(&self.source.id, self.url()).map(|s| s.categories.clone()).unwrap_or_default();
@@ -253,10 +316,13 @@ impl MangaView {
             1 => names[0].clone(),
             n => format!("{} + {}", names[0], n - 1),
         };
-        let button = pill("categories", label, false).on_click(cx.listener(|this, _, _, cx| {
+        let button = pill("categories", label, false).on_click(cx.listener(|this, _, window, cx| {
             let just_closed = this.cat_closed.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(300));
-            this.cat_menu = !this.cat_menu && !just_closed;
-            cx.notify();
+            if !this.cat_menu && !just_closed {
+                this.open_cats(window, cx);
+            } else {
+                this.close_cats(window, cx);
+            }
         }));
         let rows = all.into_iter().map(|c| {
             let on = mine.contains(&c.order);
@@ -295,22 +361,47 @@ impl MangaView {
                 }))
         });
         let empty = self.store.read(cx).categories().is_empty();
+        let scroll = self.cat_scroll.clone();
+        let thumb: Hsla = rgb(FAINT).into();
+        let bar = canvas(|_, _, _| (), move |_, _, window, _| {
+            let (view, max) = (scroll.bounds(), scroll.max_offset().y);
+            if max <= px(0.) {
+                return;
+            }
+            let track = view.size.height - u(12.);
+            let len = (track * (view.size.height / (view.size.height + max))).max(u(24.));
+            let top = view.top() + u(6.) + (track - len) * (-scroll.offset().y / max).clamp(0., 1.);
+            let mut quad = fill(Bounds::new(point(view.right() - u(4.), top), size(u(3.), len)), thumb.opacity(0.6));
+            quad.corner_radii = Corners::all(u(1.5));
+            window.paint_quad(quad);
+        })
+        .absolute()
+        .size_full();
         let panel = div()
             .id("categories-menu")
+            .track_focus(&self.cat_focus)
+            .on_key_down(cx.listener(Self::on_cat_key))
             .occlude()
             .w(u(240.))
-            .p(u(5.))
             .rounded(u(10.))
             .border_1()
             .border_color(rgb(LINE))
             .bg(rgb(SURFACE))
             .shadow_lg()
-            .children(rows)
-            .when(empty, |d| d.child(div().p(u(10.)).text_size(u(13.)).text_color(rgb(MUTED)).child("No categories yet. Add them in Settings.")))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.cat_menu = false;
+            .child(
+                div()
+                    .id("categories-scroll")
+                    .track_scroll(&self.cat_scroll)
+                    .max_h(u(360.))
+                    .overflow_y_scroll()
+                    .p(u(5.))
+                    .children(rows)
+                    .when(empty, |d| d.child(div().p(u(10.)).text_size(u(13.)).text_color(rgb(MUTED)).child("No categories yet. Add them in Settings."))),
+            )
+            .child(bar)
+            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                 this.cat_closed = Some(std::time::Instant::now());
-                cx.notify();
+                this.close_cats(window, cx);
             }));
         div()
             .relative()
