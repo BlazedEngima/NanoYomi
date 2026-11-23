@@ -5,7 +5,7 @@ use crate::u;
 use crate::{FAINT, LINE, TEXT, ACCENT};
 use gpui::{
     Animation, AnimationExt, ClickEvent, Context, EventEmitter, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    ParentElement, Pixels, Render, ShapedLine, SharedString, StatefulInteractiveElement, Styled, TextRun, Window, canvas, div, rgb,
+    Hsla, ParentElement, Pixels, Render, ShapedLine, SharedString, StatefulInteractiveElement, Styled, TextRun, Window, canvas, div, rgb,
 };
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -22,6 +22,7 @@ pub struct TextInput {
     pub compact: bool,
     back: usize,
     pulse: usize,
+    all: bool,
     shaped: Rc<RefCell<Option<(Pixels, ShapedLine)>>>,
 }
 
@@ -29,7 +30,7 @@ impl EventEmitter<InputEvent> for TextInput {}
 
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
-        TextInput { focus: cx.focus_handle(), text: String::new(), placeholder: placeholder.into(), icon: true, numeric: false, compact: false, back: 0, pulse: 0, shaped: Rc::default() }
+        TextInput { focus: cx.focus_handle(), text: String::new(), placeholder: placeholder.into(), icon: true, numeric: false, compact: false, back: 0, pulse: 0, all: false, shaped: Rc::default() }
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -50,6 +51,22 @@ impl TextInput {
         let k = &ev.keystroke;
         let len = self.text.chars().count();
         self.back = self.back.min(len);
+        let sel = std::mem::take(&mut self.all) && len > 0;
+        if sel {
+            let moved = match k.key.as_str() {
+                "backspace" | "delete" => Some((String::new(), 0)),
+                "left" | "home" => Some((self.text.clone(), len)),
+                "right" | "end" => Some((self.text.clone(), 0)),
+                _ => None,
+            };
+            if let Some((text, back)) = moved {
+                (self.text, self.back) = (text, back);
+                self.pulse += 1;
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+        }
         match (k.key.as_str(), k.modifiers.platform || k.modifiers.control) {
             ("backspace", true) | ("escape", _) => {
                 self.text.clear();
@@ -72,16 +89,26 @@ impl TextInput {
             ("right", false) => self.back = self.back.saturating_sub(1),
             ("left", true) | ("home", _) => self.back = len,
             ("right", true) | ("end", _) => self.back = 0,
-            ("enter", _) => cx.emit(InputEvent::Submit),
+            ("enter", _) => {
+                self.all = sel;
+                cx.emit(InputEvent::Submit)
+            }
+            ("a", true) => self.all = len > 0,
             ("v", true) => {
                 if let Some(t) = cx.read_from_clipboard().and_then(|c| c.text()) {
                     let numeric = self.numeric;
                     let line: String = t.lines().next().unwrap_or("").chars().filter(|c| !numeric || c.is_ascii_digit()).collect();
+                    if sel {
+                        (self.text, self.back) = (String::new(), 0);
+                    }
                     self.insert(&line);
                 }
             }
             (_, false) => match &k.key_char {
                 Some(ch) if !ch.chars().any(char::is_control) && (!self.numeric || ch.chars().all(|c| c.is_ascii_digit())) => {
+                    if sel {
+                        (self.text, self.back) = (String::new(), 0);
+                    }
                     let flip = cfg!(target_os = "macos") && window.capslock().on && ch.chars().count() == 1 && ch.chars().all(char::is_alphabetic);
                     if flip {
                         let flipped: String = ch.chars().flat_map(|c| if c.is_uppercase() { c.to_lowercase().collect::<Vec<_>>() } else { c.to_uppercase().collect() }).collect();
@@ -90,9 +117,15 @@ impl TextInput {
                         self.insert(ch);
                     }
                 }
-                _ => return,
+                _ => {
+                    self.all = sel;
+                    return;
+                }
             },
-            _ => return,
+            _ => {
+                self.all = sel;
+                return;
+            }
         }
         self.pulse += 1;
         cx.stop_propagation();
@@ -111,6 +144,7 @@ impl Render for TextInput {
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                 let at = this.shaped.borrow().as_ref().map(|(left, line)| line.closest_index_for_x(ev.position.x - *left));
+                this.all = false;
                 this.back = at.filter(|&i| this.text.is_char_boundary(i)).map_or(0, |i| this.text[i..].chars().count());
                 this.pulse += 1;
                 cx.notify();
@@ -133,6 +167,8 @@ impl Render for TextInput {
                     div().flex_none().w(u(2.)).h(u(18.)).bg(rgb(ACCENT)).with_animation(("caret", pulse), Animation::new(Duration::from_millis(1000)).repeat(), |d, t| d.opacity(if t < 0.5 { 1. } else { 0. }))
                 };
                 let empty = self.text.is_empty();
+                let selected = self.all && !empty;
+                let highlight: Hsla = rgb(ACCENT).into();
                 let (shaped, text) = (self.shaped.clone(), SharedString::from(self.text.clone()));
                 let measure = canvas(|_, _, _| (), move |bounds, _, window, _| {
                     if text.is_empty() {
@@ -156,9 +192,10 @@ impl Render for TextInput {
                     .child(measure)
                     .children((focused && empty).then(caret))
                     .children(empty.then(|| div().flex_none().text_color(rgb(FAINT)).child(self.placeholder.clone())))
-                    .children((!empty).then(|| div().flex_none().text_color(rgb(TEXT)).child(before)))
-                    .children((focused && !empty).then(caret))
-                    .children((!empty).then(|| div().flex_none().text_color(rgb(TEXT)).child(after)))
+                    .children(selected.then(|| div().flex_none().text_color(rgb(TEXT)).bg(highlight.opacity(0.35)).child(SharedString::from(self.text.clone()))))
+                    .children((!empty && !selected).then(|| div().flex_none().text_color(rgb(TEXT)).child(before)))
+                    .children((focused && !empty && !selected).then(caret))
+                    .children((!empty && !selected).then(|| div().flex_none().text_color(rgb(TEXT)).child(after)))
             })
     }
 }
