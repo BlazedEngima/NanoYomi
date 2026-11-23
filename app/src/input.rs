@@ -4,9 +4,10 @@
 use crate::u;
 use crate::{FAINT, LINE, TEXT, ACCENT};
 use gpui::{
-    ClickEvent, Context, EventEmitter, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, Window, div, rgb,
+    ClickEvent, Context, EventEmitter, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    ParentElement, Pixels, Render, ShapedLine, SharedString, StatefulInteractiveElement, Styled, TextRun, Window, canvas, div, rgb,
 };
+use std::{cell::RefCell, rc::Rc};
 
 pub enum InputEvent {
     Submit,
@@ -20,13 +21,14 @@ pub struct TextInput {
     pub numeric: bool,
     pub compact: bool,
     back: usize,
+    shaped: Rc<RefCell<Option<(Pixels, ShapedLine)>>>,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
 
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
-        TextInput { focus: cx.focus_handle(), text: String::new(), placeholder: placeholder.into(), icon: true, numeric: false, compact: false, back: 0 }
+        TextInput { focus: cx.focus_handle(), text: String::new(), placeholder: placeholder.into(), icon: true, numeric: false, compact: false, back: 0, shaped: Rc::default() }
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -105,6 +107,11 @@ impl Render for TextInput {
             .id("input")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                let at = this.shaped.borrow().as_ref().map(|(left, line)| line.closest_index_for_x(ev.position.x - *left));
+                this.back = at.filter(|&i| this.text.is_char_boundary(i)).map_or(0, |i| this.text[i..].chars().count());
+                cx.notify();
+            }))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.focus(window, cx)))
             .h(u(if self.compact { 30. } else { 40. }))
             .px(u(if self.compact { 12. } else { 16. }))
@@ -120,12 +127,27 @@ impl Render for TextInput {
             .child({
                 let caret = || div().flex_none().w(u(2.)).h(u(18.)).bg(rgb(ACCENT));
                 let empty = self.text.is_empty();
+                let (shaped, text) = (self.shaped.clone(), SharedString::from(self.text.clone()));
+                let measure = canvas(|_, _, _| (), move |bounds, _, window, _| {
+                    if text.is_empty() {
+                        *shaped.borrow_mut() = None;
+                        return;
+                    }
+                    let style = window.text_style();
+                    let run = TextRun { len: text.len(), font: style.font(), color: style.color, background_color: None, underline: None, strikethrough: None };
+                    let line = window.text_system().shape_line(text, style.font_size.to_pixels(window.rem_size()), &[run], None);
+                    *shaped.borrow_mut() = Some((bounds.origin.x, line));
+                })
+                .absolute()
+                .size_full();
                 div()
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .flex()
                     .items_center()
                     .overflow_hidden()
+                    .child(measure)
                     .children((focused && empty).then(caret))
                     .children(empty.then(|| div().flex_none().text_color(rgb(FAINT)).child(self.placeholder.clone())))
                     .children((!empty).then(|| div().flex_none().text_color(rgb(TEXT)).child(before)))
