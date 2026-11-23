@@ -114,7 +114,7 @@ impl Reader {
             inflight: HashSet::new(),
             failed: HashSet::new(),
             generation: 0,
-            viewport: window.viewport_size(),
+            viewport: crate::titlebar::viewport(window),
             scale: window.scale_factor(),
             status: "".into(),
             focus,
@@ -128,7 +128,7 @@ impl Reader {
             glide_at: Instant::now(),
             entered_fullscreen: false,
             refit: false,
-            decoded_for: window.viewport_size(),
+            decoded_for: crate::titlebar::viewport(window),
         };
         if this.store.read(cx).prefs().reader_fullscreen && !window.is_fullscreen() {
             window.toggle_fullscreen();
@@ -757,7 +757,7 @@ fn picture_element(picture: &Picture, width: f32) -> impl IntoElement {
 
 impl Render for Reader {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.viewport = window.viewport_size();
+        self.viewport = crate::titlebar::viewport(window);
         self.scale = window.scale_factor();
         let len = self.pages.len();
 
