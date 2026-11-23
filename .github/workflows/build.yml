@@ -1,7 +1,7 @@
 # Pushing a tag that starts with v builds Nano for every desktop platform and architecture, each with the extension
 # host and a trimmed Java runtime, and attaches the builds to that tag's GitHub release.
-# Hosted ARM runners are public-repo only, so ARM builds are cross-compiled on x64 (Windows, Linux) or Intel
-# builds on the ARM Mac.
+# Linux ARM64 builds on a hosted arm runner (public repos only). Windows ARM64 is cross-compiled on x64, and the
+# Intel Mac build is cross-compiled on the ARM Mac.
 name: Build
 
 on:
@@ -34,7 +34,7 @@ jobs:
           - { name: macos-arm64, os: macos-latest, target: aarch64-apple-darwin, jdk: aarch64 }
           - { name: macos-x64, os: macos-latest, target: x86_64-apple-darwin, jdk: x64 }
           - { name: linux-x64, os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, jdk: x64 }
-          - { name: linux-arm64, os: ubuntu-24.04, target: aarch64-unknown-linux-gnu, jdk: aarch64 }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, jdk: aarch64 }
     steps:
       - uses: actions/checkout@v4
 
@@ -51,32 +51,12 @@ jobs:
             Windows) choco install nasm -y && echo "C:\\Program Files\\NASM" >> "$GITHUB_PATH" ;;
           esac
 
-      # GPUI needs Wayland, X11, xkbcommon and fontconfig; wry needs WebKitGTK. ARM64 takes the arm64 packages
-      # beside the native ones (Ubuntu multiarch) and a cross linker.
+      # GPUI needs Wayland, X11, xkbcommon and fontconfig; wry needs WebKitGTK. ARM64 builds natively on an arm runner.
       - name: Linux packages
         if: runner.os == 'Linux'
         run: |
-          suffix=""
-          extra=""
-          if [ "${{ matrix.target }}" = aarch64-unknown-linux-gnu ]; then
-            sudo dpkg --add-architecture arm64
-            sudo sed -i 's/^Types: deb$/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources
-            printf 'Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports\nSuites: noble noble-updates noble-security\nComponents: main universe\nArchitectures: arm64\n' \
-              | sudo tee /etc/apt/sources.list.d/arm64.sources
-            suffix=":arm64"
-            extra="gcc-aarch64-linux-gnu g++-aarch64-linux-gnu"
-            {
-              echo "PKG_CONFIG_ALLOW_CROSS=1"
-              echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
-              echo "PKG_CONFIG_SYSROOT_DIR=/"
-              echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"
-              echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc"
-              echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++"
-            } >> "$GITHUB_ENV"
-          fi
           sudo apt-get update
-          pkgs="libwebkit2gtk-4.1-dev libgtk-3-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libasound2-dev"
-          sudo apt-get install -y $extra $(for p in $pkgs; do printf '%s%s ' "$p" "$suffix"; done)
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libasound2-dev
 
       - uses: actions/cache@v4
         with:
@@ -173,10 +153,6 @@ jobs:
           hdiutil create -volname Nano -srcfolder dist/dmg -ov -format UDZO "nano-${{ matrix.name }}.dmg"
 
       # The GNOME runtime carries WebKitGTK and the graphics libraries, so the bundle runs on any distro with Flatpak.
-      # ARM64 runs under QEMU, which is slow but only copies files.
-      - uses: docker/setup-qemu-action@v3
-        if: runner.os == 'Linux' && matrix.jdk == 'aarch64'
-
       - name: Flatpak
         if: runner.os == 'Linux'
         run: |
