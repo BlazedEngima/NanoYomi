@@ -1,5 +1,5 @@
 //! A one-line text field, since GPUI doesn't come with one.
-// No cursor movement, selection or IME yet. Just typing, backspace, paste and enter.
+// No partial selection or IME yet.
 
 use crate::u;
 use crate::{FAINT, LINE, TEXT, ACCENT};
@@ -19,41 +19,72 @@ pub struct TextInput {
     pub icon: bool,
     pub numeric: bool,
     pub compact: bool,
+    back: usize,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
 
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
-        TextInput { focus: cx.focus_handle(), text: String::new(), placeholder: placeholder.into(), icon: true, numeric: false, compact: false }
+        TextInput { focus: cx.focus_handle(), text: String::new(), placeholder: placeholder.into(), icon: true, numeric: false, compact: false, back: 0 }
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
     }
 
+    fn caret(&self) -> usize {
+        let n = self.text.chars().count();
+        self.text.char_indices().nth(n - self.back.min(n)).map_or(self.text.len(), |(i, _)| i)
+    }
+
+    fn insert(&mut self, s: &str) {
+        let at = self.caret();
+        self.text.insert_str(at, s);
+    }
+
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
+        let len = self.text.chars().count();
+        self.back = self.back.min(len);
         match (k.key.as_str(), k.modifiers.platform || k.modifiers.control) {
-            ("backspace", true) => self.text.clear(),
-            ("backspace", false) => {
-                self.text.pop();
+            ("backspace", true) | ("escape", _) => {
+                self.text.clear();
+                self.back = 0;
             }
+            ("backspace", false) => {
+                let at = self.caret();
+                if let Some(c) = self.text[..at].chars().next_back() {
+                    self.text.remove(at - c.len_utf8());
+                }
+            }
+            ("delete", _) => {
+                let at = self.caret();
+                if at < self.text.len() {
+                    self.text.remove(at);
+                    self.back -= 1;
+                }
+            }
+            ("left", false) => self.back = (self.back + 1).min(len),
+            ("right", false) => self.back = self.back.saturating_sub(1),
+            ("left", true) | ("home", _) => self.back = len,
+            ("right", true) | ("end", _) => self.back = 0,
             ("enter", _) => cx.emit(InputEvent::Submit),
-            ("escape", _) => self.text.clear(),
             ("v", true) => {
                 if let Some(t) = cx.read_from_clipboard().and_then(|c| c.text()) {
                     let numeric = self.numeric;
-                    self.text.extend(t.lines().next().unwrap_or("").chars().filter(|c| !numeric || c.is_ascii_digit()));
+                    let line: String = t.lines().next().unwrap_or("").chars().filter(|c| !numeric || c.is_ascii_digit()).collect();
+                    self.insert(&line);
                 }
             }
             (_, false) => match &k.key_char {
                 Some(ch) if !ch.chars().any(char::is_control) && (!self.numeric || ch.chars().all(|c| c.is_ascii_digit())) => {
                     let flip = cfg!(target_os = "macos") && window.capslock().on && ch.chars().count() == 1 && ch.chars().all(char::is_alphabetic);
                     if flip {
-                        self.text.extend(ch.chars().flat_map(|c| if c.is_uppercase() { c.to_lowercase().collect::<Vec<_>>() } else { c.to_uppercase().collect() }));
+                        let flipped: String = ch.chars().flat_map(|c| if c.is_uppercase() { c.to_lowercase().collect::<Vec<_>>() } else { c.to_uppercase().collect() }).collect();
+                        self.insert(&flipped);
                     } else {
-                        self.text.push_str(ch);
+                        self.insert(ch);
                     }
                 }
                 _ => return,
@@ -68,11 +99,8 @@ impl TextInput {
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus.is_focused(window);
-        let (text, color) = if self.text.is_empty() {
-            (self.placeholder.clone(), FAINT)
-        } else {
-            (SharedString::from(self.text.clone()), TEXT)
-        };
+        let (before, after) = self.text.split_at(self.caret());
+        let (before, after) = (SharedString::from(before.to_string()), SharedString::from(after.to_string()));
         div()
             .id("input")
             .track_focus(&self.focus)
@@ -99,8 +127,10 @@ impl Render for TextInput {
                     .items_center()
                     .overflow_hidden()
                     .children((focused && empty).then(caret))
-                    .child(div().flex_none().text_color(rgb(color)).child(text))
+                    .children(empty.then(|| div().flex_none().text_color(rgb(FAINT)).child(self.placeholder.clone())))
+                    .children((!empty).then(|| div().flex_none().text_color(rgb(TEXT)).child(before)))
                     .children((focused && !empty).then(caret))
+                    .children((!empty).then(|| div().flex_none().text_color(rgb(TEXT)).child(after)))
             })
     }
 }
