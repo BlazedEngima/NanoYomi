@@ -45,6 +45,8 @@ impl Host {
         if let Some(jre) = bin.parent().and_then(Path::parent).map(|d| d.join("jre")).filter(|j| j.exists()) {
             cmd.env("JAVA_HOME", jre);
         }
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000);
         let mut child = cmd
             .arg(data_dir)
             // The launcher adds these after its own defaults, so this -Xmx beats the built-in 64m.

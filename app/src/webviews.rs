@@ -19,6 +19,7 @@ const MAX_VIEWS: usize = 6;
 const BOOTSTRAP: &str = r#"(() => {
   // Stay out of other sites' frames. Turnstile checks its own window for tampering.
   try { if (window !== window.top && window.top.location.origin !== location.origin) return; } catch (e) { return; }
+  if (window !== window.top && !window.webkit) return;
   const post = (m) => { try { (window.webkit ? window.webkit.messageHandlers.ipc : window.ipc).postMessage(JSON.stringify(m)); } catch (e) {} };
   Object.defineProperty(window, '__yomiPost', { value: post });
   // Android's shouldInterceptRequest. fetch() waits for the extension's answer, XMLHttpRequest is only reported.
@@ -534,8 +535,9 @@ pub(crate) mod native {
     pub fn hide_window(wv: &WebView) {
         let hwnd = root(wv);
         unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
             let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW.0 as isize | WS_EX_NOACTIVATE.0 as isize);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (style | WS_EX_TOOLWINDOW.0 as isize | WS_EX_NOACTIVATE.0 as isize) & !(WS_EX_APPWINDOW.0 as isize));
             let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), -32000, -32000, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
     }
@@ -545,7 +547,7 @@ pub(crate) mod native {
         let hwnd = root(wv);
         unsafe {
             let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style & !(WS_EX_TOOLWINDOW.0 as isize | WS_EX_NOACTIVATE.0 as isize));
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (style & !(WS_EX_TOOLWINDOW.0 as isize | WS_EX_NOACTIVATE.0 as isize)) | WS_EX_APPWINDOW.0 as isize);
             let mut r = Default::default();
             let _ = GetWindowRect(hwnd, &mut r);
             let (w, h) = (r.right - r.left, r.bottom - r.top);
