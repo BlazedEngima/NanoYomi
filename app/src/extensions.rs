@@ -25,6 +25,10 @@ pub struct Ext {
     /// "all" for multi-language extensions.
     pub langs: Vec<String>,
     pub nsfw: bool,
+    /// Some of its sources are 18+, some aren't.
+    pub mixed: bool,
+    /// Ids of its sources, which is how a series saved from one finds it after the extension is removed.
+    pub source_ids: Vec<String>,
     pub icon_url: String,
     jar_url: String,
     /// The signing key of the repo it came from.
@@ -34,7 +38,7 @@ pub struct Ext {
 impl Ext {
     /// An installed extension that none of your repos lists any more.
     pub fn orphan(pkg: &str, name: &str, version: &str, langs: Vec<String>) -> Ext {
-        Ext { pkg: pkg.into(), name: name.into(), version: version.into(), langs, nsfw: false, icon_url: String::new(), jar_url: String::new(), key: String::new() }
+        Ext { pkg: pkg.into(), name: name.into(), version: version.into(), langs, nsfw: false, mixed: false, source_ids: vec![], icon_url: String::new(), jar_url: String::new(), key: String::new() }
     }
 }
 
@@ -131,6 +135,8 @@ fn parse_index(text: &str, key: &str) -> Result<Vec<Ext>, String> {
                 version: e["versionName"].as_str().unwrap_or("0").to_string(),
                 langs,
                 nsfw: e["contentWarning"] == "CONTENT_WARNING_NSFW",
+                mixed: e["contentWarning"] == "CONTENT_WARNING_MIXED",
+                source_ids: e["sources"].as_array()?.iter().filter_map(|s| s["id"].as_str().map(str::to_string)).collect(),
                 icon_url: e["resources"]["iconUrl"].as_str().unwrap_or_default().to_string(),
                 jar_url: e["resources"]["jarUrl"].as_str()?.to_string(),
                 key: key.to_string(),
@@ -261,9 +267,9 @@ mod tests {
             "extensionList": { "extensions": [
                 { "name": "Tachiyomi: Zeta", "packageName": "a.zeta", "versionName": "1.4.2",
                   "contentWarning": "CONTENT_WARNING_NSFW", "resources": { "jarUrl": "https://x/z.jar" },
-                  "sources": [{ "language": "en" }, { "language": "es" }, { "language": "en" }] },
+                  "sources": [{ "language": "en", "id": "11" }, { "language": "es" }, { "language": "en" }] },
                 { "name": "Alpha", "packageName": "a.alpha", "versionName": "1.0",
-                  "contentWarning": "CONTENT_WARNING_SAFE", "resources": { "jarUrl": "https://x/a.jar" },
+                  "contentWarning": "CONTENT_WARNING_MIXED", "resources": { "jarUrl": "https://x/a.jar" },
                   "sources": [{ "language": "fr" }, { "language": "de" }, { "language": "it" }, { "language": "pt" }] }
             ]}
         });
@@ -272,7 +278,8 @@ mod tests {
         assert_eq!(list.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["Alpha", "Zeta"]);
         assert_eq!(list[0].langs, ["all"]);
         assert_eq!(list[1].langs, ["en", "es"]);
-        assert!(list[1].nsfw && !list[0].nsfw);
+        assert_eq!(list[1].source_ids, ["11"]);
+        assert!(list[1].nsfw && !list[0].nsfw && list[0].mixed && !list[1].mixed);
         assert_eq!(package_of("eu.kanade.tachiyomi.extension.all.mangadex-1.6.4.jar").unwrap(), "eu.kanade.tachiyomi.extension.all.mangadex");
         assert_eq!(package_of("x.part"), None);
     }

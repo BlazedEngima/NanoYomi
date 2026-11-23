@@ -220,7 +220,7 @@ impl Library {
                     });
                     if !new.is_empty() {
                         let title = manga["title"].as_str().unwrap_or_default().to_string();
-                        let jobs = new.into_iter().map(|chapter| crate::downloads::Job { source: source.clone(), title: title.clone(), chapter }).collect();
+                        let jobs = new.into_iter().map(|chapter| crate::downloads::Job { source: source.clone(), title: title.clone(), manga: manga.clone(), chapter }).collect();
                         crate::downloads::get(cx).update(cx, |d, cx| d.enqueue(jobs, cx));
                     }
                 });
@@ -727,20 +727,21 @@ impl Render for Library {
         self.width = width;
         (self.cols, self.card_w) = grid(width, PAD, GAP, CARD_W);
         let store = self.store.read(cx);
-        self.series = store.library().into_iter().cloned().map(|mut s| {
+        let area = if self.updates_page { crate::store::Area::Updates } else { crate::store::Area::Library };
+        self.series = store.library().into_iter().filter(|s| !store.hides_series(area, s)).cloned().map(|mut s| {
             // Chapters after the scanlator filter. Not saved.
             s.chapters = s.visible();
             s.hidden_scanlators.clear();
             s
         }).collect();
         self.library_len = self.series.len();
-        let reading: Vec<Series> = store.history().into_iter().take(3).cloned().map(|mut s| {
+        let reading: Vec<Series> = store.history().into_iter().filter(|s| !store.hides_series(crate::store::Area::History, s)).take(3).cloned().map(|mut s| {
             s.chapters = s.visible();
             s.hidden_scanlators.clear();
             s
         }).collect();
 
-        self.shelves = store.categories();
+        self.shelves = store.categories().into_iter().filter(|c| !store.hides_category(c.order)).collect();
         if self.category.is_some_and(|o| !self.shelves.iter().any(|c| c.order == o)) {
             self.category = None;
         }

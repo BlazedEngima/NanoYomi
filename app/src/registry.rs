@@ -74,6 +74,12 @@ impl Registry {
         self.sources.iter().find(|s| s.id == id).map(|s| Source { host: self.host.clone(), id: s.id.clone(), name: s.name.clone(), lang: s.lang.clone(), base_url: s.base_url.clone(), installed: true })
     }
 
+    /// The installed source whose downloads folder is named `dir`, like "MangaDex (EN)".
+    pub fn by_folder(&self, dir: &str) -> Option<Source> {
+        let s = self.sources.iter().find(|s| crate::downloads::valid_name(&format!("{} ({})", s.name, s.lang.to_uppercase()), 240) == dir)?;
+        self.source(&s.id)
+    }
+
     /// Falls back to a stand-in that opens the series from what was saved.
     pub fn source_or_saved(&self, id: &str, name: &str) -> Source {
         self.source(id).unwrap_or_else(|| Source { host: self.host.clone(), id: id.into(), name: name.into(), lang: String::new(), base_url: String::new(), installed: false })
@@ -95,9 +101,32 @@ impl Registry {
         if all.iter().any(|l| l == "en") { vec!["en".into()] } else { all }
     }
 
-    /// Each extension's sources in its enabled languages.
+    /// Each extension's sources in its enabled languages, in the order the user arranged them.
     pub fn browsable(&self, store: &Store) -> Vec<SourceInfo> {
-        self.sources.iter().filter(|s| self.enabled_languages(&s.pkg, store).contains(&s.lang)).cloned().collect()
+        let mut out: Vec<SourceInfo> = self
+            .sources
+            .iter()
+            .filter(|s| self.enabled_languages(&s.pkg, store).contains(&s.lang) && !store.hides(crate::store::Area::Sources, &s.id))
+            .cloned()
+            .collect();
+        let order = &store.prefs().source_order;
+        out.sort_by_key(|s| order.iter().position(|id| *id == s.id).unwrap_or(usize::MAX));
+        out
+    }
+
+    /// Reads the lists saved on disk, without the network, unless a list is already loaded. Lets NSFW sources be told apart before the Extensions screen is ever opened.
+    pub fn load_cached_index(&mut self, repos: Vec<Repo>, cx: &mut Context<Self>) {
+        let dir = self.data_dir.clone();
+        cx.spawn(async move |this, cx| {
+            let cached = cx.background_executor().spawn(async move { extensions::cached_index(&repos, &dir) }).await;
+            let _ = this.update(cx, |r, cx| {
+                if r.index.is_none() {
+                    r.index = Some(Arc::new(cached));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Shows the cached lists right away, then fetches fresh ones. Call again after the repos change.

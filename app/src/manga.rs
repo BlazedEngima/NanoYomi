@@ -43,6 +43,8 @@ pub struct MangaView {
     covers: Covers,
     pub manga: Value,
     chapters: Arc<Vec<Value>>,
+    /// Shown from downloads alone, so only downloaded chapters list.
+    local: bool,
     /// Hidden scanlators. Until the user picks, only the main group shows.
     hidden: Vec<String>,
     chosen: bool,
@@ -82,6 +84,15 @@ impl EventEmitter<MangaEvent> for MangaView {}
 
 impl MangaView {
     pub fn new(source: Source, cache: Entity<ImageCache>, store: Entity<Store>, manga: Value, cx: &mut Context<Self>) -> Self {
+        Self::build(source, cache, store, manga, None, cx)
+    }
+
+    /// A series shown from its downloads alone: no network, and only these chapters.
+    pub fn local(source: Source, cache: Entity<ImageCache>, store: Entity<Store>, manga: Value, chapters: Vec<Value>, cx: &mut Context<Self>) -> Self {
+        Self::build(source, cache, store, manga, Some(chapters), cx)
+    }
+
+    fn build(source: Source, cache: Entity<ImageCache>, store: Entity<Store>, manga: Value, local: Option<Vec<Value>>, cx: &mut Context<Self>) -> Self {
         // Saved series show their stored chapters straight away until the update below lands.
         let saved = store.read(cx).get(&source.id, manga["url"].as_str().unwrap_or_default()).cloned();
         let search = cx.new(|cx| TextInput::new("Search chapters…", cx));
@@ -93,7 +104,7 @@ impl MangaView {
         ];
         let call_source = source.clone();
         let request = json!({ "manga": manga, "chapters": [] });
-        let installed = source.installed;
+        let installed = source.installed && local.is_none();
         cx.spawn(async move |this, cx| {
             if !installed {
                 return; // extension's gone, so show what was saved
@@ -120,7 +131,9 @@ impl MangaView {
             });
         })
         .detach();
-        let status = if !source.installed {
+        let status = if local.is_some() {
+            String::new()
+        } else if !source.installed {
             format!("{} isn't installed. Showing what was saved.", source.name)
         } else if saved.is_some() {
             String::new()
@@ -134,9 +147,10 @@ impl MangaView {
             store,
             covers: Covers::default(),
             manga,
-            chapters: Arc::new(saved.as_ref().map(|s| s.chapters.clone()).unwrap_or_default()),
-            hidden: saved.as_ref().map(|s| s.hidden()).unwrap_or_default(),
-            chosen: saved.as_ref().is_some_and(|s| s.scanlators_chosen),
+            chapters: Arc::new(local.clone().or_else(|| saved.as_ref().map(|s| s.chapters.clone())).unwrap_or_default()),
+            hidden: if local.is_some() { vec![] } else { saved.as_ref().map(|s| s.hidden()).unwrap_or_default() },
+            chosen: local.is_some() || saved.as_ref().is_some_and(|s| s.scanlators_chosen),
+            local: local.is_some(),
             // NANO_DEMO_MODE=series-menu opens with the scanlator menu shown (for testing).
             menu: crate::demo_mode() == "series-menu",
             menu_closed: None,
@@ -215,7 +229,7 @@ impl MangaView {
     }
 
     fn job(&self, i: usize) -> crate::downloads::Job {
-        crate::downloads::Job { source: self.source.clone(), title: self.title(), chapter: self.visible[i].clone() }
+        crate::downloads::Job { source: self.source.clone(), title: self.title(), manga: self.manga.clone(), chapter: self.visible[i].clone() }
     }
 
     fn is_downloaded(&self, i: usize) -> bool {
@@ -752,7 +766,7 @@ impl MangaView {
         let cover = self.covers.get(&self.cache, fetch, url.as_deref(), |m: &mut MangaView| &mut m.covers, cx);
         let saved = self.store.read(cx).get(&self.source.id, self.url()).cloned();
         let in_library = saved.as_ref().is_some_and(|s| s.in_library);
-        let installed = self.source.installed;
+        let installed = self.source.installed || self.local;
         let resume = saved.as_ref().and_then(|s| {
             let p = s.progress.as_ref()?;
             Some((self.visible.iter().position(|c| c["url"] == p.chapter_url.as_str())?, p.page, p.chapter_name.clone()))
@@ -914,7 +928,11 @@ impl Render for MangaView {
             self.zoom_seen = crate::zoom();
             self.list.remeasure();
         }
-        self.visible = Arc::new(visible_chapters(&self.chapters, &self.hidden));
+        let mut visible = visible_chapters(&self.chapters, &self.hidden);
+        if self.local {
+            visible.retain(|c| self.downloaded.contains(&crate::downloads::chapter_name(c)));
+        }
+        self.visible = Arc::new(visible);
         let saved = self.store.read(cx).get(&self.source.id, self.url());
         self.read = saved.map_or_else(|| vec![false; self.visible.len()], |s| s.read_flags(&self.visible));
         self.bookmarks = saved.map(|s| s.bookmarks.clone()).unwrap_or_default();

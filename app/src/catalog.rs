@@ -430,7 +430,7 @@ pub fn chip(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, on: 
         .child(label.into())
 }
 
-pub fn small_button(id: impl Into<gpui::ElementId>, label: &'static str, primary: bool) -> gpui::Stateful<gpui::Div> {
+pub fn small_button(id: impl Into<gpui::ElementId>, label: impl Into<gpui::SharedString>, primary: bool) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .flex_none()
@@ -446,7 +446,7 @@ pub fn small_button(id: impl Into<gpui::ElementId>, label: &'static str, primary
         .text_color(rgb(if primary { ACCENT_TEXT } else { MUTED }))
         .font_weight(if primary { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
         .hover(|s| s.bg(rgb(HOVER)))
-        .child(label)
+        .child(label.into())
 }
 
 impl Render for Catalog {
@@ -458,13 +458,16 @@ impl Render for Catalog {
         let query = self.search.read(cx).text.trim().to_lowercase();
         let registry = self.registry.read(cx);
         let index = registry.index.clone().unwrap_or_default();
+        let flags = self.store.read(cx).prefs().nsfw;
+        let (hide, mixed) = (flags.get(crate::store::Area::Extensions), flags.mixed);
+        let flagged = move |e: &Ext| hide && (e.nsfw || (mixed && e.mixed));
         let (lang, nsfw) = (self.lang.clone(), self.nsfw);
         let matches = |e: &Ext| {
             (query.is_empty() || e.name.to_lowercase().contains(&query))
                 && lang.as_ref().is_none_or(|l| e.langs.iter().any(|x| x == l || x == "all"))
-                && (nsfw || !e.nsfw)
+                && (nsfw || !e.nsfw) && !flagged(e)
         };
-        self.installed = index.iter().filter(|e| registry.installed.contains(&e.pkg)).cloned().collect();
+        self.installed = index.iter().filter(|e| registry.installed.contains(&e.pkg) && !flagged(e)).cloned().collect();
         let mut orphans: Vec<&String> = registry.installed.iter().filter(|p| !index.iter().any(|e| &e.pkg == *p)).collect();
         orphans.sort();
         for pkg in orphans {

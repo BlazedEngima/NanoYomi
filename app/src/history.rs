@@ -90,11 +90,11 @@ impl History {
 
 impl Render for History {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.rows = self
-            .store
-            .read(cx)
+        let store = self.store.read(cx);
+        self.rows = store
             .history()
             .into_iter()
+            .filter(|s| !store.hides_series(crate::store::Area::History, s))
             .cloned()
             .map(|mut s| {
                 // Chapters after the scanlator filter. Not saved.
