@@ -1,11 +1,11 @@
 //! A one-line text field, since GPUI doesn't come with one.
-// No partial selection or IME yet.
+// No IME yet.
 
 use crate::u;
 use crate::{FAINT, LINE, TEXT, ACCENT};
 use gpui::{
     Animation, AnimationExt, ClickEvent, Context, EventEmitter, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    Hsla, ParentElement, Pixels, Render, ShapedLine, SharedString, StatefulInteractiveElement, Styled, TextRun, Window, canvas, div, rgb,
+    Hsla, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ShapedLine, SharedString, StatefulInteractiveElement, Styled, TextRun, Window, canvas, div, rgb,
 };
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -21,8 +21,9 @@ pub struct TextInput {
     pub numeric: bool,
     pub compact: bool,
     back: usize,
+    anchor: Option<usize>,
+    dragging: bool,
     pulse: usize,
-    all: bool,
     shaped: Rc<RefCell<Option<(Pixels, ShapedLine)>>>,
 }
 
@@ -30,19 +31,54 @@ impl EventEmitter<InputEvent> for TextInput {}
 
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
-        TextInput { focus: cx.focus_handle(), text: String::new(), placeholder: placeholder.into(), icon: true, numeric: false, compact: false, back: 0, pulse: 0, all: false, shaped: Rc::default() }
+        TextInput {
+            focus: cx.focus_handle(),
+            text: String::new(),
+            placeholder: placeholder.into(),
+            icon: true,
+            numeric: false,
+            compact: false,
+            back: 0,
+            anchor: None,
+            dragging: false,
+            pulse: 0,
+            shaped: Rc::default(),
+        }
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
     }
 
-    fn caret(&self) -> usize {
+    fn byte_at(&self, back: usize) -> usize {
         let n = self.text.chars().count();
-        self.text.char_indices().nth(n - self.back.min(n)).map_or(self.text.len(), |(i, _)| i)
+        self.text.char_indices().nth(n - back.min(n)).map_or(self.text.len(), |(i, _)| i)
+    }
+
+    fn caret(&self) -> usize {
+        self.byte_at(self.back)
+    }
+
+    fn selection(&self) -> Option<(usize, usize)> {
+        let (a, b) = (self.byte_at(self.anchor?), self.caret());
+        (a != b).then_some((a.min(b), a.max(b)))
+    }
+
+    fn back_at(&self, x: Pixels) -> usize {
+        let at = self.shaped.borrow().as_ref().map(|(left, line)| line.closest_index_for_x(x - *left));
+        at.filter(|&i| self.text.is_char_boundary(i)).map_or(0, |i| self.text[i..].chars().count())
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some((a, b)) = self.selection() else { return false };
+        self.text.replace_range(a..b, "");
+        self.back = self.text[a..].chars().count();
+        self.anchor = None;
+        true
     }
 
     fn insert(&mut self, s: &str) {
+        self.delete_selection();
         let at = self.caret();
         self.text.insert_str(at, s);
     }
@@ -51,22 +87,24 @@ impl TextInput {
         let k = &ev.keystroke;
         let len = self.text.chars().count();
         self.back = self.back.min(len);
-        let sel = std::mem::take(&mut self.all) && len > 0;
-        if sel {
-            let moved = match k.key.as_str() {
-                "backspace" | "delete" => Some((String::new(), 0)),
-                "left" | "home" => Some((self.text.clone(), len)),
-                "right" | "end" => Some((self.text.clone(), 0)),
+        if let Some((a, b)) = self.selection() {
+            let collapsed = match k.key.as_str() {
+                "backspace" | "delete" => self.delete_selection().then_some(self.back),
+                "left" => Some(self.text[a..].chars().count()),
+                "home" => Some(len),
+                "right" => Some(self.text[b..].chars().count()),
+                "end" => Some(0),
                 _ => None,
             };
-            if let Some((text, back)) = moved {
-                (self.text, self.back) = (text, back);
+            if let Some(back) = collapsed {
+                (self.back, self.anchor) = (back, None);
                 self.pulse += 1;
                 cx.stop_propagation();
                 cx.notify();
                 return;
             }
         }
+        let mut keep_selection = false;
         match (k.key.as_str(), k.modifiers.platform || k.modifiers.control) {
             ("backspace", true) | ("escape", _) => {
                 self.text.clear();
@@ -89,26 +127,20 @@ impl TextInput {
             ("right", false) => self.back = self.back.saturating_sub(1),
             ("left", true) | ("home", _) => self.back = len,
             ("right", true) | ("end", _) => self.back = 0,
-            ("enter", _) => {
-                self.all = sel;
-                cx.emit(InputEvent::Submit)
+            ("enter", _) => cx.emit(InputEvent::Submit),
+            ("a", true) => {
+                keep_selection = len > 0;
+                (self.anchor, self.back) = (keep_selection.then_some(len), 0);
             }
-            ("a", true) => self.all = len > 0,
             ("v", true) => {
                 if let Some(t) = cx.read_from_clipboard().and_then(|c| c.text()) {
                     let numeric = self.numeric;
                     let line: String = t.lines().next().unwrap_or("").chars().filter(|c| !numeric || c.is_ascii_digit()).collect();
-                    if sel {
-                        (self.text, self.back) = (String::new(), 0);
-                    }
                     self.insert(&line);
                 }
             }
             (_, false) => match &k.key_char {
                 Some(ch) if !ch.chars().any(char::is_control) && (!self.numeric || ch.chars().all(|c| c.is_ascii_digit())) => {
-                    if sel {
-                        (self.text, self.back) = (String::new(), 0);
-                    }
                     let flip = cfg!(target_os = "macos") && window.capslock().on && ch.chars().count() == 1 && ch.chars().all(char::is_alphabetic);
                     if flip {
                         let flipped: String = ch.chars().flat_map(|c| if c.is_uppercase() { c.to_lowercase().collect::<Vec<_>>() } else { c.to_uppercase().collect() }).collect();
@@ -117,15 +149,12 @@ impl TextInput {
                         self.insert(ch);
                     }
                 }
-                _ => {
-                    self.all = sel;
-                    return;
-                }
+                _ => return,
             },
-            _ => {
-                self.all = sel;
-                return;
-            }
+            _ => return,
+        }
+        if !keep_selection {
+            self.anchor = None;
         }
         self.pulse += 1;
         cx.stop_propagation();
@@ -136,17 +165,38 @@ impl TextInput {
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus.is_focused(window);
-        let (before, after) = self.text.split_at(self.caret());
-        let (before, after) = (SharedString::from(before.to_string()), SharedString::from(after.to_string()));
+        let selection = self.selection();
+        let (from, to) = selection.unwrap_or((self.caret(), self.caret()));
+        let part = |range: std::ops::Range<usize>| SharedString::from(self.text[range].to_string());
+        let (before, middle, after) = (part(0..from), part(from..to), part(to..self.text.len()));
         div()
             .id("input")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
-                let at = this.shaped.borrow().as_ref().map(|(left, line)| line.closest_index_for_x(ev.position.x - *left));
-                this.all = false;
-                this.back = at.filter(|&i| this.text.is_char_boundary(i)).map_or(0, |i| this.text[i..].chars().count());
+                this.back = this.back_at(ev.position.x);
+                (this.anchor, this.dragging) = (Some(this.back), true);
                 this.pulse += 1;
+                cx.notify();
+            }))
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if this.dragging && ev.pressed_button == Some(MouseButton::Left) {
+                    this.back = this.back_at(ev.position.x);
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                this.dragging = false;
+                if this.anchor == Some(this.back) {
+                    this.anchor = None;
+                }
+                cx.notify();
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                this.dragging = false;
+                if this.anchor == Some(this.back) {
+                    this.anchor = None;
+                }
                 cx.notify();
             }))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.focus(window, cx)))
@@ -167,7 +217,6 @@ impl Render for TextInput {
                     div().flex_none().w(u(2.)).h(u(18.)).bg(rgb(ACCENT)).with_animation(("caret", pulse), Animation::new(Duration::from_millis(1000)).repeat(), |d, t| d.opacity(if t < 0.5 { 1. } else { 0. }))
                 };
                 let empty = self.text.is_empty();
-                let selected = self.all && !empty;
                 let highlight: Hsla = rgb(ACCENT).into();
                 let (shaped, text) = (self.shaped.clone(), SharedString::from(self.text.clone()));
                 let measure = canvas(|_, _, _| (), move |bounds, _, window, _| {
@@ -182,6 +231,7 @@ impl Render for TextInput {
                 })
                 .absolute()
                 .size_full();
+                let plain = |s: SharedString| div().flex_none().text_color(rgb(TEXT)).child(s);
                 div()
                     .relative()
                     .flex_1()
@@ -192,10 +242,10 @@ impl Render for TextInput {
                     .child(measure)
                     .children((focused && empty).then(caret))
                     .children(empty.then(|| div().flex_none().text_color(rgb(FAINT)).child(self.placeholder.clone())))
-                    .children(selected.then(|| div().flex_none().text_color(rgb(TEXT)).bg(highlight.opacity(0.35)).child(SharedString::from(self.text.clone()))))
-                    .children((!empty && !selected).then(|| div().flex_none().text_color(rgb(TEXT)).child(before)))
-                    .children((focused && !empty && !selected).then(caret))
-                    .children((!empty && !selected).then(|| div().flex_none().text_color(rgb(TEXT)).child(after)))
+                    .children((!empty).then(|| plain(before)))
+                    .children(selection.map(|_| plain(middle).bg(highlight.opacity(0.35))))
+                    .children((focused && !empty && selection.is_none()).then(caret))
+                    .children((!empty).then(|| plain(after)))
             })
     }
 }
