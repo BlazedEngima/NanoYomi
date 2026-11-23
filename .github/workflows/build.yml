@@ -1,7 +1,7 @@
 # Pushing a tag that starts with v builds Nano for every desktop platform and architecture, each with the extension
 # host and a trimmed Java runtime, and attaches the builds to that tag's GitHub release.
-# Hosted ARM runners are public-repo only, so ARM builds are cross-compiled on x64 (Windows, Linux) or Intel
-# builds on the ARM Mac.
+# Linux ARM64 builds on a hosted arm runner (public repos only). Windows ARM64 is cross-compiled on x64, and the
+# Intel Mac build is cross-compiled on the ARM Mac.
 name: Build
 
 on:
