@@ -29,6 +29,8 @@ pub struct Ext {
     pub mixed: bool,
     /// Ids of its sources, which is how a series saved from one finds it after the extension is removed.
     pub source_ids: Vec<String>,
+    pub sites: Vec<String>,
+    pub site: Option<String>,
     pub icon_url: String,
     jar_url: String,
     /// The signing key of the repo it came from.
@@ -38,8 +40,37 @@ pub struct Ext {
 impl Ext {
     /// An installed extension that none of your repos lists any more.
     pub fn orphan(pkg: &str, name: &str, version: &str, langs: Vec<String>) -> Ext {
-        Ext { pkg: pkg.into(), name: name.into(), version: version.into(), langs, nsfw: false, mixed: false, source_ids: vec![], icon_url: String::new(), jar_url: String::new(), key: String::new() }
+        Ext { pkg: pkg.into(), name: name.into(), version: version.into(), langs, nsfw: false, mixed: false, source_ids: vec![], sites: vec![], site: None, icon_url: String::new(), jar_url: String::new(), key: String::new() }
     }
+}
+
+impl Ext {
+    pub fn rows(&self) -> Vec<Ext> {
+        if self.sites.is_empty() {
+            return vec![self.clone()];
+        }
+        self.sites.iter().map(|s| Ext { name: s.clone(), site: Some(s.clone()), ..self.clone() }).collect()
+    }
+}
+
+pub fn site_of(name: &str) -> String {
+    match name.rsplit_once(" (") {
+        Some((base, n)) if n.strip_suffix(')').is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) => base.to_string(),
+        _ => name.to_string(),
+    }
+}
+
+fn split_sites(sources: &[(String, String)]) -> Vec<String> {
+    let mut sites: Vec<String> = vec![];
+    let mut split = false;
+    for (lang, name) in sources {
+        let site = site_of(name);
+        split |= sources.iter().any(|(l, n)| l == lang && site_of(n) != site);
+        if !sites.contains(&site) {
+            sites.push(site);
+        }
+    }
+    if split { sites } else { vec![] }
 }
 
 /// Extension icons come from a public CDN, not through a source.
@@ -124,6 +155,11 @@ fn parse_index(text: &str, key: &str) -> Result<Vec<Ext>, String> {
         .filter_map(|e| {
             let mut langs: Vec<String> =
                 e["sources"].as_array()?.iter().filter_map(|s| s["language"].as_str().map(str::to_string)).collect();
+            let pairs: Vec<(String, String)> = e["sources"]
+                .as_array()?
+                .iter()
+                .filter_map(|s| Some((s["language"].as_str()?.to_string(), s["name"].as_str()?.to_string())))
+                .collect();
             langs.sort();
             langs.dedup();
             if langs.len() > 3 {
@@ -137,6 +173,8 @@ fn parse_index(text: &str, key: &str) -> Result<Vec<Ext>, String> {
                 nsfw: e["contentWarning"] == "CONTENT_WARNING_NSFW",
                 mixed: e["contentWarning"] == "CONTENT_WARNING_MIXED",
                 source_ids: e["sources"].as_array()?.iter().filter_map(|s| s["id"].as_str().map(str::to_string)).collect(),
+                sites: split_sites(&pairs),
+                site: None,
                 icon_url: e["resources"]["iconUrl"].as_str().unwrap_or_default().to_string(),
                 jar_url: e["resources"]["jarUrl"].as_str()?.to_string(),
                 key: key.to_string(),
@@ -282,6 +320,16 @@ mod tests {
         assert!(list[1].nsfw && !list[0].nsfw && list[0].mixed && !list[1].mixed);
         assert_eq!(package_of("eu.kanade.tachiyomi.extension.all.mangadex-1.6.4.jar").unwrap(), "eu.kanade.tachiyomi.extension.all.mangadex");
         assert_eq!(package_of("x.part"), None);
+    }
+
+    #[test]
+    fn splits_sites_sharing_a_jar() {
+        let src = |v: &[(&str, &str)]| v.iter().map(|(l, n)| (l.to_string(), n.to_string())).collect::<Vec<_>>();
+        assert_eq!(split_sites(&src(&[("en", "LewdManhwa"), ("en", "Toonx"), ("en", "Toonz")])), ["LewdManhwa", "Toonx", "Toonz"]);
+        assert!(split_sites(&src(&[("all", "Komga"), ("all", "Komga (2)"), ("all", "Komga (3)")])).is_empty());
+        assert!(split_sites(&src(&[("en", "MangaToon"), ("es", "MangaToon"), ("fr", "MangaToon")])).is_empty());
+        assert!(split_sites(&src(&[("en", "Site"), ("es", "Sitio")])).is_empty());
+        assert_eq!(site_of("Shadow Manga (+18)"), "Shadow Manga (+18)");
     }
 
     #[test]

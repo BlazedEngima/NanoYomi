@@ -192,10 +192,10 @@ impl Catalog {
     }
 
     /// Every language the extension offers has its own settings, enabled ones first.
-    fn open_settings(&mut self, pkg: &str, cx: &mut Context<Self>) {
+    fn open_settings(&mut self, pkg: &str, site: Option<&str>, cx: &mut Context<Self>) {
         let registry = self.registry.read(cx);
         let enabled = registry.enabled_languages(pkg, self.store.read(cx));
-        let mut infos: Vec<_> = registry.sources.iter().filter(|s| s.pkg == pkg).cloned().collect();
+        let mut infos: Vec<_> = registry.sources.iter().filter(|s| s.pkg == pkg && site.is_none_or(|n| extensions::site_of(&s.name) == n)).cloned().collect();
         infos.sort_by_key(|s| (!enabled.contains(&s.lang), s.lang.clone()));
         let sources: Vec<_> = infos.iter().filter_map(|s| registry.source(&s.id)).collect();
         if sources.is_empty() {
@@ -210,6 +210,30 @@ impl Catalog {
         });
         self.settings = Some((view, sub));
         cx.notify();
+    }
+
+    fn add(&mut self, e: &Ext, cx: &mut Context<Self>) {
+        let installed = self.registry.read(cx).installed.contains(&e.pkg);
+        if let Some(site) = &e.site {
+            let mut on = if installed { self.store.read(cx).sites(&e.pkg).cloned().unwrap_or_else(|| e.sites.clone()) } else { vec![] };
+            on.push(site.clone());
+            self.store.update(cx, |s, cx| s.set_sites(&e.pkg, on, cx));
+        }
+        if !installed {
+            self.registry.update(cx, |r, cx| r.install(e.clone(), cx));
+        }
+    }
+
+    fn remove(&mut self, e: &Ext, cx: &mut Context<Self>) {
+        if let Some(site) = &e.site {
+            let mut on = self.store.read(cx).sites(&e.pkg).cloned().unwrap_or_else(|| e.sites.clone());
+            on.retain(|s| s != site);
+            if !on.is_empty() {
+                self.store.update(cx, |s, cx| s.set_sites(&e.pkg, on, cx));
+                return;
+            }
+        }
+        self.registry.update(cx, |r, cx| r.uninstall(&e.pkg, cx));
     }
 
     fn icon(&mut self, e: &Ext, size: f32, cx: &mut Context<Self>) -> AnyElement {
@@ -241,10 +265,9 @@ impl Catalog {
         let multi = langs.len() > 1;
         // Drop the stack trace the host adds.
         let error = registry.errors.get(&e.pkg).map(|err| format!("Couldn't load: {}", err.lines().next().unwrap_or(err)));
-        let pkg = e.pkg.clone();
         let have = registry.versions.get(&e.pkg).cloned().unwrap_or_else(|| e.version.clone());
         let update = (!e.key.is_empty() && have != e.version).then(|| {
-            let id = SharedString::from(format!("up-{}", e.pkg));
+            let id = SharedString::from(format!("up-{}", row_key(&e)));
             if registry.busy.contains(&e.pkg) {
                 small_button(id, "Updating…", false).opacity(0.6)
             } else {
@@ -252,16 +275,12 @@ impl Catalog {
                 small_button(id, "Update", true).on_click(cx.listener(move |this, _, _, cx| this.registry.update(cx, |r, cx| r.install(ext.clone(), cx))))
             }
         });
-        let pkg_settings = e.pkg.clone();
+        let (pkg_settings, site_settings) = (e.pkg.clone(), e.site.clone());
         let settings = (!registry.sources.iter().all(|s| s.pkg != e.pkg)).then(|| {
-            small_button(SharedString::from(format!("set-{}", e.pkg)), "Settings", false).on_click(cx.listener(move |this, _, _, cx| this.open_settings(&pkg_settings, cx)))
+            small_button(SharedString::from(format!("set-{}", row_key(&e))), "Settings", false).on_click(cx.listener(move |this, _, _, cx| this.open_settings(&pkg_settings, site_settings.as_deref(), cx)))
         });
-        let remove = small_button(SharedString::from(format!("rm-{}", e.pkg)), "Remove", false).on_click(cx.listener(
-            move |this, _, _, cx| {
-                let pkg = pkg.clone();
-                this.registry.update(cx, |r, cx| r.uninstall(&pkg, cx))
-            },
-        ));
+        let row = e.clone();
+        let remove = small_button(SharedString::from(format!("rm-{}", row_key(&e))), "Remove", false).on_click(cx.listener(move |this, _, _, cx| this.remove(&row, cx)));
         div()
             .w_full()
             .px(u(PAD))
@@ -308,12 +327,12 @@ impl Catalog {
         let e = self.available[i].clone();
         let icon = self.icon(&e, 40., cx);
         let busy = self.registry.read(cx).busy.contains(&e.pkg);
-        let id = SharedString::from(format!("add-{}", e.pkg));
+        let id = SharedString::from(format!("add-{}", row_key(&e)));
         let button = if busy {
             small_button(id, "Installing…", false).opacity(0.6)
         } else {
             let ext = e.clone();
-            small_button(id, "Install", true).on_click(cx.listener(move |this, _, _, cx| this.registry.update(cx, |r, cx| r.install(ext.clone(), cx))))
+            small_button(id, "Install", true).on_click(cx.listener(move |this, _, _, cx| this.add(&ext, cx)))
         };
         div()
             .w(u(self.card_w))
@@ -449,6 +468,10 @@ pub fn small_button(id: impl Into<gpui::ElementId>, label: impl Into<gpui::Share
         .child(label.into())
 }
 
+fn row_key(e: &Ext) -> String {
+    format!("{}-{}", e.pkg, e.site.as_deref().unwrap_or(""))
+}
+
 impl Render for Catalog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.zoom_seen != crate::zoom() {
@@ -467,7 +490,9 @@ impl Render for Catalog {
                 && lang.as_ref().is_none_or(|l| e.langs.iter().any(|x| x == l || x == "all"))
                 && (nsfw || !e.nsfw) && !flagged(e)
         };
-        self.installed = index.iter().filter(|e| registry.installed.contains(&e.pkg) && !flagged(e)).cloned().collect();
+        let store = self.store.read(cx);
+        let is_on = |r: &Ext| registry.installed.contains(&r.pkg) && r.site.as_ref().is_none_or(|s| store.sites(&r.pkg).is_none_or(|on| on.contains(s)));
+        self.installed = index.iter().filter(|e| !flagged(e)).flat_map(Ext::rows).filter(|r| is_on(r)).collect();
         let mut orphans: Vec<&String> = registry.installed.iter().filter(|p| !index.iter().any(|e| &e.pkg == *p)).collect();
         orphans.sort();
         for pkg in orphans {
@@ -475,7 +500,7 @@ impl Render for Catalog {
             let langs = registry.languages(pkg);
             self.installed.push(Ext::orphan(pkg, &name, registry.versions.get(pkg).map_or("", |v| v.as_str()), langs));
         }
-        self.available = index.iter().filter(|e| !registry.installed.contains(&e.pkg) && matches(e)).cloned().collect();
+        self.available = index.iter().flat_map(Ext::rows).filter(|r| !is_on(r) && matches(r)).collect();
         (self.cols, self.card_w) = grid(crate::content_width(window), PAD, GAP, CARD_MIN);
 
         let mut counts: HashMap<&str, usize> = HashMap::new();
