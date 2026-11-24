@@ -77,6 +77,10 @@ pub struct MangaView {
     row_menu: Option<(usize, gpui::Point<gpui::Pixels>)>,
     /// The trackers drawer, over the panel while open.
     tracking: Option<Entity<crate::tracking::Tracking>>,
+    /// Bumped when the store or the downloads change. The chapter rows are only rebuilt when this or the chapters,
+    /// scanlator filter, search or sort order change, since that copies every chapter.
+    data_gen: u64,
+    built: Option<(u64, usize, usize, Vec<String>, String, bool)>,
     _subs: Vec<Subscription>,
 }
 
@@ -98,7 +102,10 @@ impl MangaView {
         let search = cx.new(|cx| TextInput::new("Search chapters…", cx));
         let downloads = crate::downloads::get(cx);
         let subs = vec![
-            cx.observe(&store, |_, _, cx| cx.notify()),
+            cx.observe(&store, |this, _, cx| {
+                this.data_gen += 1;
+                cx.notify();
+            }),
             cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.observe(&downloads, |this, _, cx| this.refresh_downloaded(cx)),
         ];
@@ -173,6 +180,8 @@ impl MangaView {
             downloaded,
             tracking: None,
             status: status.into(),
+            data_gen: 0,
+            built: None,
             _subs: subs,
         }
     }
@@ -225,6 +234,7 @@ impl MangaView {
 
     fn refresh_downloaded(&mut self, cx: &mut Context<Self>) {
         self.downloaded = crate::downloads::downloaded(&self.source, &self.title());
+        self.data_gen += 1;
         cx.notify();
     }
 
@@ -928,20 +938,25 @@ impl Render for MangaView {
             self.zoom_seen = crate::zoom();
             self.list.remeasure();
         }
-        let mut visible = visible_chapters(&self.chapters, &self.hidden);
-        if self.local {
-            visible.retain(|c| self.downloaded.contains(&crate::downloads::chapter_name(c)));
-        }
-        self.visible = Arc::new(visible);
-        let saved = self.store.read(cx).get(&self.source.id, self.url());
-        self.read = saved.map_or_else(|| vec![false; self.visible.len()], |s| s.read_flags(&self.visible));
-        self.bookmarks = saved.map(|s| s.bookmarks.clone()).unwrap_or_default();
         let query = self.search.read(cx).text.trim().to_lowercase();
-        self.rows = (0..self.visible.len())
-            .filter(|&i| query.is_empty() || self.visible[i]["name"].as_str().unwrap_or("").to_lowercase().contains(&query))
-            .collect();
-        if self.store.read(cx).prefs().chapters_oldest_first {
-            self.rows.reverse();
+        let oldest_first = self.store.read(cx).prefs().chapters_oldest_first;
+        let key = (self.data_gen, Arc::as_ptr(&self.chapters) as usize, self.chapters.len(), self.hidden.clone(), query.clone(), oldest_first);
+        if self.built.as_ref() != Some(&key) {
+            let mut visible = visible_chapters(&self.chapters, &self.hidden);
+            if self.local {
+                visible.retain(|c| self.downloaded.contains(&crate::downloads::chapter_name(c)));
+            }
+            self.visible = Arc::new(visible);
+            let saved = self.store.read(cx).get(&self.source.id, self.url());
+            self.read = saved.map_or_else(|| vec![false; self.visible.len()], |s| s.read_flags(&self.visible));
+            self.bookmarks = saved.map(|s| s.bookmarks.clone()).unwrap_or_default();
+            self.rows = (0..self.visible.len())
+                .filter(|&i| query.is_empty() || self.visible[i]["name"].as_str().unwrap_or("").to_lowercase().contains(&query))
+                .collect();
+            if oldest_first {
+                self.rows.reverse();
+            }
+            self.built = Some(key);
         }
         let mut items = vec![Item::Hero, Item::Bar, Item::Header];
         if self.rows.is_empty() {
