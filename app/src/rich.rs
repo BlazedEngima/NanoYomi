@@ -183,20 +183,151 @@ fn highlights(b: &Block) -> Vec<(Range<usize>, HighlightStyle)> {
         .collect()
 }
 
-pub fn render(src: &str) -> impl IntoElement {
-    div().flex().flex_col().gap(u(2.)).children(parse(src).into_iter().enumerate().map(|(i, b)| {
-        let urls: Vec<String> = b.links.iter().map(|l| l.1.clone()).collect();
-        let ranges: Vec<Range<usize>> = b.links.iter().map(|l| l.0.clone()).collect();
-        let text = StyledText::new(SharedString::from(b.text.clone())).with_highlights(highlights(&b));
-        let text = InteractiveText::new(("desc", i), text).on_click(ranges, move |ix, _, cx| {
-            let url = &urls[ix];
-            if url.starts_with("https://") || url.starts_with("http://") {
-                cx.open_url(url);
+fn is_rtl_char(c: char) -> bool {
+    matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF)
+}
+
+/// True when the paragraph is mostly right-to-left letters.
+fn is_rtl_block(s: &str) -> bool {
+    let (mut rtl, mut other) = (0usize, 0usize);
+    for c in s.chars().filter(|c| c.is_alphabetic()) {
+        if is_rtl_char(c) { rtl += 1 } else { other += 1 }
+    }
+    rtl > 0 && rtl >= other
+}
+
+/// Byte ranges of visual tokens: whitespace-separated words, with adjacent Latin words merged.
+fn rtl_tokens(s: &str) -> Vec<Range<usize>> {
+    let mut words: Vec<Range<usize>> = vec![];
+    let mut start = None;
+    for (i, c) in s.char_indices() {
+        if c.is_whitespace() {
+            if let Some(st) = start.take() {
+                words.push(st..i);
             }
-        });
-        let row = div().flex().when(b.gap, |d| d.mt(u(12.)));
-        if b.bullet { row.gap(u(8.)).pl(u(4.)).child("•").child(div().flex_1().min_w_0().child(text)) } else { row.child(div().flex_1().min_w_0().child(text)) }
-    }))
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(st) = start {
+        words.push(st..s.len());
+    }
+    let is_ltr = |r: &Range<usize>| {
+        let w = &s[r.clone()];
+        w.chars().any(|c| c.is_ascii_alphanumeric()) && !w.chars().any(is_rtl_char)
+    };
+    let mut out: Vec<Range<usize>> = vec![];
+    let mut prev_ltr = false;
+    for w in words {
+        let ltr = is_ltr(&w);
+        if ltr && prev_ltr {
+            out.last_mut().unwrap().end = w.end;
+        } else {
+            out.push(w);
+        }
+        prev_ltr = ltr;
+    }
+    out
+}
+
+fn clip(rs: &[Range<usize>], r: &Range<usize>) -> Vec<Range<usize>> {
+    rs.iter()
+        .filter_map(|x| {
+            let (s, e) = (x.start.max(r.start), x.end.min(r.end));
+            (s < e).then(|| s - r.start..e - r.start)
+        })
+        .collect()
+}
+
+/// An RTL paragraph as short, separately shaped tokens laid out right-to-left,
+/// so gpui never has to wrap RTL text itself.
+fn render_rtl_block(block_ix: usize, b: &Block) -> impl IntoElement {
+    let items: Vec<_> =
+        rtl_tokens(&b.text)
+            .into_iter()
+            .enumerate()
+            .map(|(ti, r)| {
+                let sub = Block {
+                    text: b.text[r.clone()].to_string(),
+                    bold: clip(&b.bold, &r),
+                    italic: clip(&b.italic, &r),
+                    links: b
+                        .links
+                        .iter()
+                        .filter_map(|(lr, url)| {
+                            let (s, e) = (lr.start.max(r.start), lr.end.min(r.end));
+                            (s < e).then(|| (s - r.start..e - r.start, url.clone()))
+                        })
+                        .collect(),
+                    ..Default::default()
+                };
+                let urls: Vec<String> = sub.links.iter().map(|l| l.1.clone()).collect();
+                let ranges: Vec<Range<usize>> = sub.links.iter().map(|l| l.0.clone()).collect();
+                let text = StyledText::new(SharedString::from(sub.text.clone()))
+                    .with_highlights(highlights(&sub));
+                let text = InteractiveText::new(("desc-rtl", (block_ix << 16) | ti), text)
+                    .on_click(ranges, move |ix, _, cx| {
+                        let url = &urls[ix];
+                        if url.starts_with("https://") || url.starts_with("http://") {
+                            cx.open_url(url);
+                        }
+                    });
+                div().child(text)
+            })
+            .collect();
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_wrap()
+        .flex_row_reverse()
+        .gap_x(u(4.))
+        .children(items)
+}
+
+pub fn render(src: &str) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(u(2.))
+        .children(parse(src).into_iter().enumerate().map(|(i, b)| {
+            let row = div().w_full().flex().when(b.gap, |d| d.mt(u(12.)));
+            if is_rtl_block(&b.text) {
+                let content = render_rtl_block(i, &b);
+                return if b.bullet {
+                    row.flex_row_reverse()
+                        .gap(u(8.))
+                        .pr(u(4.))
+                        .child("•")
+                        .child(content)
+                        .into_any_element()
+                } else {
+                    row.child(content).into_any_element()
+                };
+            }
+            let urls: Vec<String> = b.links.iter().map(|l| l.1.clone()).collect();
+            let ranges: Vec<Range<usize>> = b.links.iter().map(|l| l.0.clone()).collect();
+            let text =
+                StyledText::new(SharedString::from(b.text.clone())).with_highlights(highlights(&b));
+            let text =
+                InteractiveText::new(("desc", i), text).on_click(ranges, move |ix, _, cx| {
+                    let url = &urls[ix];
+                    if url.starts_with("https://") || url.starts_with("http://") {
+                        cx.open_url(url);
+                    }
+                });
+            if b.bullet {
+                row.gap(u(8.))
+                    .pl(u(4.))
+                    .child("•")
+                    .child(div().flex_1().min_w_0().child(text))
+                    .into_any_element()
+            } else {
+                row.child(div().flex_1().min_w_0().child(text))
+                    .into_any_element()
+            }
+        }))
 }
 
 #[cfg(test)]
@@ -204,21 +335,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rtl_detection() {
+        assert!(is_rtl_block("حكاية الفارس الأسود الغامض غاتس."));
+        assert!(is_rtl_block("قصة مانجا Blue Lock في اليابان"));
+        assert!(!is_rtl_block(
+            "After a disastrous defeat at the 2018 World Cup."
+        ));
+    }
+
+    #[test]
+    fn rtl_tokens_keep_latin_together() {
+        let s = "قصة مانجا Blue Lock (2018) في";
+        let t: Vec<&str> = rtl_tokens(s).into_iter().map(|r| &s[r]).collect();
+        assert_eq!(t, ["قصة", "مانجا", "Blue Lock (2018)", "في"]);
+    }
+
+    #[test]
     fn markdown() {
-        let b = parse("Intro *soft* text.\n\n**Source:**\n- [Webtoon](https://x.moe/s) and https://a.b/c.");
+        let b = parse(
+            "Intro *soft* text.\n\n**Source:**\n- [Webtoon](https://x.moe/s) and https://a.b/c.",
+        );
         assert_eq!(b.len(), 3);
         assert_eq!(b[0].text, "Intro soft text.");
         assert_eq!(b[0].italic, vec![6..10]);
         assert!(b[1].gap && b[1].text == "Source:" && b[1].bold == vec![0..7]);
         assert!(b[2].bullet && b[2].text == "Webtoon and https://a.b/c.");
-        assert_eq!(b[2].links, vec![(0..7, "https://x.moe/s".into()), (12..25, "https://a.b/c".into())]);
+        assert_eq!(
+            b[2].links,
+            vec![
+                (0..7, "https://x.moe/s".into()),
+                (12..25, "https://a.b/c".into())
+            ]
+        );
         assert_eq!(parse("2 * 3 = 6")[0].text, "2 * 3 = 6");
     }
 
     #[test]
     fn html() {
-        let b = parse("<p>A &amp; <b>B</b><br>See <a href=\"https://x.y\">site</a></p><ul><li>one</li></ul>");
-        assert_eq!(b.iter().map(|b| b.text.as_str()).collect::<Vec<_>>(), ["A & B", "See site", "one"]);
+        let b = parse(
+            "<p>A &amp; <b>B</b><br>See <a href=\"https://x.y\">site</a></p><ul><li>one</li></ul>",
+        );
+        assert_eq!(
+            b.iter().map(|b| b.text.as_str()).collect::<Vec<_>>(),
+            ["A & B", "See site", "one"]
+        );
         assert_eq!(b[0].bold, vec![4..5]);
         assert_eq!(b[1].links, vec![(4..8, "https://x.y".into())]);
         assert!(b[2].bullet);
