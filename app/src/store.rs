@@ -341,6 +341,8 @@ struct Data {
     #[serde(default)]
     languages: std::collections::HashMap<String, Vec<String>>,
     #[serde(default)]
+    sites: std::collections::HashMap<String, Vec<String>>,
+    #[serde(default)]
     zoom: Option<f32>,
     #[serde(default)]
     solver_url: String,
@@ -744,6 +746,16 @@ impl Store {
 
     pub fn set_languages(&mut self, pkg: &str, langs: Vec<String>, cx: &mut Context<Self>) {
         self.data.languages.insert(pkg.to_string(), langs);
+        self.save_soon(cx);
+        cx.notify();
+    }
+
+    pub fn sites(&self, pkg: &str) -> Option<&Vec<String>> {
+        self.data.sites.get(pkg)
+    }
+
+    pub fn set_sites(&mut self, pkg: &str, sites: Vec<String>, cx: &mut Context<Self>) {
+        self.data.sites.insert(pkg.to_string(), sites);
         self.save_soon(cx);
         cx.notify();
     }

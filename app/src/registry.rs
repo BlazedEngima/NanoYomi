@@ -106,7 +106,11 @@ impl Registry {
         let mut out: Vec<SourceInfo> = self
             .sources
             .iter()
-            .filter(|s| self.enabled_languages(&s.pkg, store).contains(&s.lang) && !store.hides(crate::store::Area::Sources, &s.id))
+            .filter(|s| {
+                self.enabled_languages(&s.pkg, store).contains(&s.lang)
+                    && store.sites(&s.pkg).is_none_or(|on| on.contains(&extensions::site_of(&s.name)))
+                    && !store.hides(crate::store::Area::Sources, &s.id)
+            })
             .cloned()
             .collect();
         let order = &store.prefs().source_order;
