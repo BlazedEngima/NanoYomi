@@ -53,8 +53,18 @@ impl Host {
             .env("YOMI_HOST_OPTS", format!("-Xmx{heap_mb}m"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            // Piped, not inherited: with no console of its own on Windows, the host's errors would go nowhere.
+            .stderr(Stdio::piped())
             .spawn()?;
+        let stderr = child.stderr.take().expect("piped stderr");
+        std::thread::spawn(move || {
+            // Bytes, since Java on Windows may not write UTF-8, and stopping early would leave the host blocked on a full pipe.
+            let (mut r, mut line) = (BufReader::new(stderr), Vec::new());
+            while r.read_until(b'\n', &mut line).is_ok_and(|n| n > 0) {
+                eprint!("{}", String::from_utf8_lossy(&line));
+                line.clear();
+            }
+        });
         let stdout = child.stdout.take().expect("piped stdout");
         let stdin = child.stdin.take().expect("piped stdin");
         let pending: Pending = Arc::default();
@@ -74,6 +84,7 @@ impl Host {
                     let _ = tx.send(parse_reply(msg));
                 }
             }
+            eprintln!("Extension host stopped. Anything it printed is above.");
             // The host died, so fail whatever's still waiting.
             for (_, tx) in reader_pending.lock().unwrap().drain() {
                 let _ = tx.send(Err(HostError::Failed("extension host exited".into())));
