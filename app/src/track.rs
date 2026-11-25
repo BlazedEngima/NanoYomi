@@ -263,6 +263,7 @@ fn answer(mut stream: TcpStream, tracker: i64) -> Option<Vec<(String, String)>> 
 /// Signs in to Kitsu or MangaUpdates with what was typed in Settings.
 pub fn password_login(tracker: i64, user: &str, password: &str) -> Result<Login, String> {
     let refused = |e: ureq::Error| match e {
+        ureq::Error::StatusCode(400 | 401) if tracker == KITSU => "Kitsu didn't accept that email and password.".to_string(),
         ureq::Error::StatusCode(400 | 401) => format!("{} didn't accept that username and password.", name(tracker)),
         e => e.to_string(),
     };

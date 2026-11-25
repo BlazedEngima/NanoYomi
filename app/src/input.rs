@@ -16,7 +16,7 @@ pub enum InputEvent {
 pub struct TextInput {
     focus: FocusHandle,
     pub text: String,
-    placeholder: SharedString,
+    pub placeholder: SharedString,
     pub icon: bool,
     pub numeric: bool,
     pub compact: bool,

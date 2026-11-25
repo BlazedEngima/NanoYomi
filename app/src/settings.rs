@@ -65,7 +65,7 @@ impl Settings {
         .detach();
         let new_category = plain("New category name", "", cx);
         cx.subscribe(&new_category, |this, _, _: &InputEvent, cx| this.add_category(cx)).detach();
-        let login_user = plain("Username or email", "", cx);
+        let login_user = plain("Username", "", cx);
         let login_pass = plain("Password", "", cx);
         login_pass.update(cx, |i, _| i.secret = true);
         for input in [&login_user, &login_pass] {
@@ -856,7 +856,12 @@ impl Render for Settings {
                     if crate::track::uses_password(tracker) {
                         this.login_open = Some(tracker);
                         this.track_note.clear();
-                        this.login_user.update(cx, |i, cx| i.focus(window, cx));
+                        // Kitsu only signs in by email.
+                        let hint = if tracker == crate::track::KITSU { "Email" } else { "Username" };
+                        this.login_user.update(cx, |i, cx| {
+                            i.placeholder = hint.into();
+                            i.focus(window, cx)
+                        });
                         cx.notify();
                     } else {
                         this.sign_in(tracker, cx)
