@@ -1,4 +1,4 @@
-//! MyAnimeList and AniList tracking, with Mihon's tracker ids, statuses and scores so phones read the entries as their own.
+//! MyAnimeList, AniList, Kitsu and MangaUpdates tracking, with Mihon's tracker ids, statuses and scores so phones read the entries as their own.
 
 use crate::store::{Track, now_ms};
 use serde::{Deserialize, Serialize};
@@ -9,14 +9,23 @@ use std::time::{Duration, Instant};
 
 pub const MAL: i64 = 1;
 pub const ANILIST: i64 = 2;
-pub const TRACKERS: [i64; 2] = [MAL, ANILIST];
+pub const KITSU: i64 = 3;
+pub const MANGAUPDATES: i64 = 7;
+pub const TRACKERS: [i64; 4] = [MAL, ANILIST, KITSU, MANGAUPDATES];
 
 const MAL_CLIENT: &str = "ec51dd01e909b73bd7873a2e62e742b4";
 const ANILIST_CLIENT: &str = "57476";
+// Kitsu's public app, the same one Mihon signs in with.
+const KITSU_CLIENT: &str = "dd031b32d2f56c990b1425efe6c42ad847e7fe3ab46bf1299f05ecd856bdb7dd";
+const KITSU_SECRET: &str = "54d7307928f63414defd96399fc31ba847961ceaecef3a5fd93144e960c0e151";
+const KITSU_TOKEN: &str = "https://kitsu.app/api/oauth/token";
+const KITSU_GRAPHQL: &str = "https://kitsu.app/api/graphql";
+const MU: &str = "https://api.mangaupdates.com/v1";
+const ANILIST_GRAPHQL: &str = "https://graphql.anilist.co";
 /// Where both sites send you after sign-in. Registered with each, so don't change it.
 const PORT: u16 = 47621;
 
-/// Statuses shared by both, under Mihon's numbers. Planning and rereading differ, see `plan` and `reread`.
+/// Statuses MyAnimeList, AniList and Kitsu share, under Mihon's numbers. MangaUpdates numbers its lists differently, see the functions below.
 pub const READING: i64 = 1;
 pub const COMPLETED: i64 = 2;
 pub const ON_HOLD: i64 = 3;
@@ -48,44 +57,69 @@ pub fn name(tracker: i64) -> &'static str {
     match tracker {
         MAL => "MyAnimeList",
         ANILIST => "AniList",
+        KITSU => "Kitsu",
+        MANGAUPDATES => "MangaUpdates",
         _ => "Tracker",
     }
 }
 
 pub fn configured(tracker: i64) -> bool {
-    !match tracker {
-        MAL => MAL_CLIENT,
-        _ => ANILIST_CLIENT,
+    match tracker {
+        MAL => !MAL_CLIENT.is_empty(),
+        ANILIST => !ANILIST_CLIENT.is_empty(),
+        _ => true,
     }
-    .is_empty()
+}
+
+/// Kitsu and MangaUpdates sign in with a username and password instead of the browser.
+pub fn uses_password(tracker: i64) -> bool {
+    matches!(tracker, KITSU | MANGAUPDATES)
+}
+
+/// MangaUpdates' reading list is 0, where the others use 0 for unset.
+fn reading(tracker: i64) -> i64 {
+    if tracker == MANGAUPDATES { 0 } else { READING }
 }
 
 fn plan(tracker: i64) -> i64 {
-    if tracker == MAL { 6 } else { 5 }
+    match tracker {
+        MAL => 6,
+        MANGAUPDATES => 1,
+        _ => 5,
+    }
 }
 
-fn reread(tracker: i64) -> i64 {
-    if tracker == MAL { 7 } else { 6 }
+fn reread(tracker: i64) -> Option<i64> {
+    match tracker {
+        MAL => Some(7),
+        ANILIST => Some(6),
+        _ => None,
+    }
 }
 
-pub fn statuses(tracker: i64) -> [(i64, &'static str); 6] {
-    [
-        (READING, "Reading"),
-        (plan(tracker), "Plan to read"),
-        (COMPLETED, "Completed"),
-        (ON_HOLD, "On hold"),
-        (DROPPED, "Dropped"),
-        (reread(tracker), "Rereading"),
-    ]
+pub fn statuses(tracker: i64) -> Vec<(i64, &'static str)> {
+    let (on_hold, dropped) = if tracker == MANGAUPDATES { (4, 3) } else { (ON_HOLD, DROPPED) };
+    let mut list = vec![(reading(tracker), "Reading"), (plan(tracker), "Plan to read"), (COMPLETED, "Completed"), (on_hold, "On hold"), (dropped, "Dropped")];
+    list.extend(reread(tracker).map(|s| (s, "Rereading")));
+    list
 }
 
-/// The 0 to 10 score shown, from what's stored. Mihon keeps AniList's on its 100 point scale.
+/// The 0 to 10 score shown, from what's stored. Mihon keeps AniList's out of 100 and Kitsu's out of 20.
 pub fn score_of(t: &Track) -> i64 {
-    if t.tracker == ANILIST { (t.score / 10.).round() as i64 } else { t.score.round() as i64 }
+    match t.tracker {
+        ANILIST => (t.score / 10.).round() as i64,
+        KITSU => (t.score / 2.).round() as i64,
+        _ => t.score.round() as i64,
+    }
 }
 
 pub fn set_score(t: &mut Track, ten: i64) {
-    t.score = if t.tracker == ANILIST { ten as f32 * 10. } else { ten as f32 };
+    t.score = ten as f32
+        * match t.tracker {
+            ANILIST => 10.,
+            KITSU => 2.,
+            _ => 1.,
+        };
 }
 
 /// Moves a track up to chapter `number` the way Mihon does after reading. Never moves it back.
@@ -95,9 +129,9 @@ pub fn advance(t: &mut Track, number: f32, now: i64) -> bool {
     }
     t.last_read = number;
     if t.status == 0 || t.status == plan(t.tracker) {
-        t.status = READING;
+        t.status = reading(t.tracker);
     }
-    if t.status == READING && t.started == 0 {
+    if t.status == reading(t.tracker) && t.started == 0 {
         t.started = now;
     }
     if t.total > 0 && number as i64 >= t.total && t.status != COMPLETED {
@@ -170,7 +204,7 @@ pub fn finish_login(tracker: i64, state: &str, verifier: &str) -> Result<Login, 
         if login.access.is_empty() {
             return Err("AniList sent no token. Try again.".into());
         }
-        let me = graphql(&login, "query { Viewer { id name } }", json!({}))?;
+        let me = graphql(ANILIST_GRAPHQL, &login, "query { Viewer { id name } }", json!({}))?;
         login.user = me["Viewer"]["name"].as_str().unwrap_or_default().to_string();
         login.user_id = me["Viewer"]["id"].as_i64().unwrap_or(0);
         Ok(login)
@@ -226,6 +260,31 @@ fn answer(mut stream: TcpStream, tracker: i64) -> Option<Vec<(String, String)>> 
     Some(query.split('&').filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect())
 }
 
+/// Signs in to Kitsu or MangaUpdates with what was typed in Settings.
+pub fn password_login(tracker: i64, user: &str, password: &str) -> Result<Login, String> {
+    let refused = |e: ureq::Error| match e {
+        ureq::Error::StatusCode(400 | 401) => format!("{} didn't accept that username and password.", name(tracker)),
+        e => e.to_string(),
+    };
+    if tracker == KITSU {
+        let fields = [("grant_type", "password"), ("username", user), ("password", password), ("client_id", KITSU_CLIENT), ("client_secret", KITSU_SECRET)];
+        let res = agent().post(KITSU_TOKEN).send_form(fields).map_err(refused)?;
+        let mut login = tokens(&read(Ok(res))?)?;
+        let me = graphql(KITSU_GRAPHQL, &login, "query { currentAccount { id profile { name } } }", json!({}))?;
+        login.user = me["currentAccount"]["profile"]["name"].as_str().unwrap_or(user).to_string();
+        login.user_id = me["currentAccount"]["id"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+        Ok(login)
+    } else {
+        let body = json!({ "username": user, "password": password }).to_string();
+        let res = agent().put(format!("{MU}/account/login")).header("Content-Type", "application/json").send(body).map_err(refused)?;
+        let v = read(Ok(res))?;
+        let mut login = Login { access: v["context"]["session_token"].as_str().ok_or("MangaUpdates sent no session")?.to_string(), ..Login::default() };
+        login.user_id = v["context"]["uid"].as_i64().unwrap_or(0);
+        login.user = call(&login, "GET", &format!("{MU}/account/profile"), None)?["username"].as_str().unwrap_or(user).to_string();
+        Ok(login)
+    }
+}
+
 fn tokens(v: &Value) -> Result<Login, String> {
     let access = v["access_token"].as_str().ok_or("No token in the reply")?.to_string();
     Ok(Login {
@@ -236,13 +295,17 @@ fn tokens(v: &Value) -> Result<Login, String> {
     })
 }
 
-/// MyAnimeList tokens last a month. Refreshes one that's about to expire, and returns true if `login` changed.
+/// MyAnimeList and Kitsu tokens last a month. Refreshes one that's about to expire, and returns true if `login` changed.
 pub fn refresh(tracker: i64, login: &mut Login) -> Result<bool, String> {
-    if tracker != MAL || login.expires == 0 || login.expires > now_ms() + 60_000 {
+    if !matches!(tracker, MAL | KITSU) || login.expires == 0 || login.expires > now_ms() + 60_000 {
         return Ok(false);
     }
-    let v = form("https://myanimelist.net/v1/oauth2/token", &[("client_id", MAL_CLIENT), ("grant_type", "refresh_token"), ("refresh_token", &login.refresh)])
-        .map_err(|_| "MyAnimeList signed you out. Sign in again in Settings.".to_string())?;
+    let v = if tracker == MAL {
+        form("https://myanimelist.net/v1/oauth2/token", &[("client_id", MAL_CLIENT), ("grant_type", "refresh_token"), ("refresh_token", &login.refresh)])
+    } else {
+        form(KITSU_TOKEN, &[("client_id", KITSU_CLIENT), ("client_secret", KITSU_SECRET), ("grant_type", "refresh_token"), ("refresh_token", &login.refresh)])
+    }
+    .map_err(|_| format!("{} signed you out. Sign in again in Settings.", name(tracker)))?;
     let fresh = tokens(&v)?;
     login.access = fresh.access;
     login.refresh = fresh.refresh;
@@ -259,6 +322,9 @@ fn read(res: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<Va
         e => e.to_string(),
     })?;
     let text = res.body_mut().read_to_string().map_err(|e| e.to_string())?;
+    if text.trim().is_empty() {
+        return Ok(Value::Null);
+    }
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
@@ -274,18 +340,31 @@ fn mal_get(login: &Login, url: &str, query: &[(&str, &str)]) -> Result<Value, St
     read(agent().get(url).header("Authorization", format!("Bearer {}", login.access)).query_pairs(query.iter().copied()).call())
 }
 
-fn graphql(login: &Login, query: &str, variables: Value) -> Result<Value, String> {
+/// A JSON request with the sign-in's token.
+fn call(login: &Login, method: &str, url: &str, body: Option<Value>) -> Result<Value, String> {
+    let auth = format!("Bearer {}", login.access);
+    read(match method {
+        "GET" => agent().get(url).header("Authorization", &auth).call(),
+        "DELETE" => agent().delete(url).header("Authorization", &auth).call(),
+        _ => if method == "PUT" { agent().put(url) } else { agent().post(url) }
+            .header("Authorization", &auth)
+            .header("Content-Type", "application/json")
+            .send(body.unwrap_or_default().to_string()),
+    })
+}
+
+fn graphql(endpoint: &str, login: &Login, query: &str, variables: Value) -> Result<Value, String> {
     let body = json!({ "query": query, "variables": variables }).to_string();
     let v = read(
         agent()
-            .post("https://graphql.anilist.co")
+            .post(endpoint)
             .header("Authorization", format!("Bearer {}", login.access))
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
             .send(body),
     )?;
     if let Some(e) = v["errors"].as_array().and_then(|a| a.first()) {
-        return Err(e["message"].as_str().unwrap_or("AniList refused that").to_string());
+        return Err(e["message"].as_str().unwrap_or("The tracker refused that").to_string());
     }
     Ok(v["data"].clone())
 }
@@ -293,6 +372,11 @@ fn graphql(login: &Login, query: &str, variables: Value) -> Result<Value, String
 // Search, link and update
 
 pub fn search(tracker: i64, login: &Login, query: &str) -> Result<Vec<Found>, String> {
+    match tracker {
+        KITSU => return kitsu_search(login, query),
+        MANGAUPDATES => return mu_search(login, query),
+        _ => {}
+    }
     if tracker == MAL {
         // MyAnimeList refuses queries over 64 characters.
         let q: String = query.chars().take(64).collect();
@@ -322,6 +406,7 @@ pub fn search(tracker: i64, login: &Login, query: &str) -> Result<Vec<Found>, St
             .collect())
     } else {
         let v = graphql(
+            ANILIST_GRAPHQL,
             login,
             "query ($q: String) { Page(perPage: 30) { media(search: $q, type: MANGA, format_not_in: [NOVEL]) { id title { userPreferred } format chapters startDate { year } siteUrl } } }",
             json!({ "q": query }),
@@ -345,11 +430,15 @@ pub fn search(tracker: i64, login: &Login, query: &str) -> Result<Vec<Found>, St
 /// Links a series to `found`, keeping your entry there or adding one, and catches it up to `read`.
 pub fn bind(tracker: i64, login: &Login, found: &Found, read: f32) -> Result<Track, String> {
     let mut t = Track { tracker, media_id: found.id, url: found.url.clone(), title: found.title.clone(), total: found.chapters, ..Track::default() };
-    let listed = if tracker == MAL {
+    let listed = if tracker == KITSU {
+        kitsu_entry(login, &mut t)?
+    } else if tracker == MANGAUPDATES {
+        mu_entry(login, &mut t)
+    } else if tracker == MAL {
         let v = mal_get(login, &format!("https://api.myanimelist.net/v2/manga/{}", found.id), &[("fields", "num_chapters,my_list_status{start_date,finish_date}")])?;
         let s = &v["my_list_status"];
         s.is_object().then(|| {
-            t.status = if s["is_rereading"].as_bool() == Some(true) { reread(MAL) } else { mal_status_from(s["status"].as_str().unwrap_or("")) };
+            t.status = if s["is_rereading"].as_bool() == Some(true) { 7 } else { mal_status_from(s["status"].as_str().unwrap_or("")) };
             t.last_read = s["num_chapters_read"].as_f64().unwrap_or(0.) as f32;
             t.score = s["score"].as_f64().unwrap_or(0.) as f32;
             t.started = s["start_date"].as_str().map_or(0, ms_of);
@@ -357,6 +446,7 @@ pub fn bind(tracker: i64, login: &Login, found: &Found, read: f32) -> Result<Tra
         })
     } else {
         let v = graphql(
+            ANILIST_GRAPHQL,
             login,
             "query ($u: Int, $m: Int) { Page { mediaList(userId: $u, type: MANGA, mediaId: $m) { id status scoreRaw: score(format: POINT_100) progress private startedAt { year month day } completedAt { year month day } } } }",
             json!({ "u": login.user_id, "m": found.id }),
@@ -371,10 +461,14 @@ pub fn bind(tracker: i64, login: &Login, found: &Found, read: f32) -> Result<Tra
             t.finished = fuzzy_ms(&e["completedAt"]);
         })
     };
-    let caught_up = advance(&mut t, read, now_ms());
-    if listed.is_none() && t.status == 0 {
+    if listed.is_none() {
         t.status = plan(tracker);
+        if tracker == MANGAUPDATES {
+            // MangaUpdates only updates series already on a list.
+            call(login, "POST", &format!("{MU}/lists/series"), Some(json!([{ "series": { "id": t.media_id }, "list_id": t.status }])))?;
+        }
     }
+    let caught_up = advance(&mut t, read, now_ms());
     if listed.is_none() || caught_up {
         push(login, &mut t)?;
     }
@@ -383,11 +477,16 @@ pub fn bind(tracker: i64, login: &Login, found: &Found, read: f32) -> Result<Tra
 
 /// Sends a track's status, progress, score and dates.
 pub fn push(login: &Login, t: &mut Track) -> Result<(), String> {
+    match t.tracker {
+        KITSU => return kitsu_push(login, t),
+        MANGAUPDATES => return mu_push(login, t),
+        _ => {}
+    }
     let date = |ms: i64| if ms == 0 { String::new() } else { crate::manga::ymd(ms) };
     if t.tracker == MAL {
         let (started, finished) = (date(t.started), date(t.finished));
         let status = mal_status_to(t.status);
-        let rereading = (t.status == reread(MAL)).to_string();
+        let rereading = (t.status == 7).to_string();
         let (score, chapters) = ((t.score.round() as i64).to_string(), (t.last_read as i64).to_string());
         let mut fields = vec![("status", status), ("is_rereading", rereading.as_str()), ("score", score.as_str()), ("num_chapters_read", chapters.as_str())];
         if !started.is_empty() {
@@ -409,6 +508,7 @@ pub fn push(login: &Login, t: &mut Track) -> Result<(), String> {
             json!({ "year": n(0..4), "month": n(5..7), "day": n(8..10) })
         };
         let v = graphql(
+            ANILIST_GRAPHQL,
             login,
             "mutation ($m: Int, $p: Int, $s: MediaListStatus, $private: Boolean, $score: Int, $start: FuzzyDateInput, $end: FuzzyDateInput) { SaveMediaListEntry(mediaId: $m, progress: $p, status: $s, private: $private, scoreRaw: $score, startedAt: $start, completedAt: $end) { id } }",
             json!({
@@ -419,6 +519,129 @@ pub fn push(login: &Login, t: &mut Track) -> Result<(), String> {
         t.library_id = v["SaveMediaListEntry"]["id"].as_i64().unwrap_or(t.library_id);
         Ok(())
     }
+}
+
+// Kitsu
+
+const KITSU_STATUSES: [(i64, &str); 5] = [(READING, "CURRENT"), (5, "PLANNED"), (COMPLETED, "COMPLETED"), (ON_HOLD, "ON_HOLD"), (DROPPED, "DROPPED")];
+
+fn kitsu_search(login: &Login, query: &str) -> Result<Vec<Found>, String> {
+    let v = graphql(
+        KITSU_GRAPHQL,
+        login,
+        "query ($q: String!) { searchMangaByTitle(title: $q, first: 20) { nodes { id titles { preferred } chapterCount subtype startDate slug } } }",
+        json!({ "q": query }),
+    )?;
+    Ok(v["searchMangaByTitle"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["subtype"] != "NOVEL")
+        .map(|m| Found {
+            id: m["id"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0),
+            title: m["titles"]["preferred"].as_str().unwrap_or_default().to_string(),
+            kind: m["subtype"].as_str().unwrap_or_default().to_lowercase(),
+            year: m["startDate"].as_str().unwrap_or_default().chars().take(4).collect(),
+            chapters: m["chapterCount"].as_i64().unwrap_or(0),
+            url: format!("https://kitsu.app/manga/{}", m["slug"].as_str().unwrap_or_default()),
+        })
+        .collect())
+}
+
+/// Fills `t` from your Kitsu entry, if there is one.
+fn kitsu_entry(login: &Login, t: &mut Track) -> Result<Option<()>, String> {
+    let v = graphql(
+        KITSU_GRAPHQL,
+        login,
+        "query ($id: ID!) { findMangaById(id: $id) { myLibraryEntry { id private progress rating status startedAt finishedAt } } }",
+        json!({ "id": t.media_id.to_string() }),
+    )?;
+    let e = &v["findMangaById"]["myLibraryEntry"];
+    let iso = |v: &Value| v.as_str().map_or(0, |s| ms_of(&s[..s.len().min(10)]));
+    Ok(e.is_object().then(|| {
+        t.library_id = e["id"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+        t.status = KITSU_STATUSES.iter().find(|(_, s)| e["status"] == *s).map_or(5, |(n, _)| *n);
+        t.last_read = e["progress"].as_f64().unwrap_or(0.) as f32;
+        t.score = e["rating"].as_f64().unwrap_or(0.) as f32;
+        t.private = e["private"].as_bool().unwrap_or(false);
+        t.started = iso(&e["startedAt"]);
+        t.finished = iso(&e["finishedAt"]);
+    }))
+}
+
+/// Adds the entry first if Kitsu doesn't have it, since adding takes no dates.
+fn kitsu_push(login: &Login, t: &mut Track) -> Result<(), String> {
+    let status = KITSU_STATUSES.iter().find(|(n, _)| *n == t.status).map_or("CURRENT", |(_, s)| *s);
+    // Kitsu rates 2 to 20, and null clears it.
+    let rating = (t.score >= 2.).then(|| t.score.round() as i64);
+    let fail = |v: &Value, op: &str| v["libraryEntry"][op]["errors"][0]["message"].as_str().map(|m| Err(m.to_string()));
+    if t.library_id == 0 {
+        let v = graphql(
+            KITSU_GRAPHQL,
+            login,
+            "mutation ($m: ID!, $s: LibraryEntryStatusEnum!, $p: Int!, $private: Boolean!, $r: Int) { libraryEntry { create(input: { mediaId: $m, mediaType: MANGA, status: $s, progress: $p, private: $private, rating: $r }) { errors { message } libraryEntry { id } } } }",
+            json!({ "m": t.media_id.to_string(), "s": status, "p": t.last_read as i64, "private": t.private, "r": rating }),
+        )?;
+        fail(&v, "create").unwrap_or(Ok(()))?;
+        t.library_id = v["libraryEntry"]["create"]["libraryEntry"]["id"].as_str().and_then(|s| s.parse().ok()).ok_or("Kitsu didn't add it")?;
+    }
+    let iso = |ms: i64| if ms == 0 { Value::Null } else { json!(format!("{}T00:00:00Z", crate::manga::ymd(ms))) };
+    let v = graphql(
+        KITSU_GRAPHQL,
+        login,
+        "mutation ($id: ID!, $s: LibraryEntryStatusEnum!, $p: Int!, $private: Boolean!, $r: Int, $start: ISO8601DateTime, $end: ISO8601DateTime) { libraryEntry { update(input: { id: $id, status: $s, progress: $p, private: $private, rating: $r, startedAt: $start, finishedAt: $end }) { errors { message } } } }",
+        json!({ "id": t.library_id.to_string(), "s": status, "p": t.last_read as i64, "private": t.private, "r": rating, "start": iso(t.started), "end": iso(t.finished) }),
+    )?;
+    fail(&v, "update").unwrap_or(Ok(()))
+}
+
+// MangaUpdates
+
+fn mu_search(login: &Login, query: &str) -> Result<Vec<Found>, String> {
+    let v = call(login, "POST", &format!("{MU}/series/search"), Some(json!({ "search": query, "filter_types": ["drama cd", "novel"] })))?;
+    Ok(v["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|r| &r["record"])
+        .map(|r| Found {
+            id: r["series_id"].as_i64().unwrap_or(0),
+            title: unescape(r["title"].as_str().unwrap_or_default()),
+            kind: r["type"].as_str().unwrap_or_default().to_lowercase(),
+            year: r["year"].as_str().unwrap_or_default().to_string(),
+            // MangaUpdates has no chapter total, like in Mihon.
+            chapters: 0,
+            url: r["url"].as_str().unwrap_or_default().to_string(),
+        })
+        .collect())
+}
+
+/// Fills `t` from your MangaUpdates lists. Any failure counts as not listed, as in Mihon.
+fn mu_entry(login: &Login, t: &mut Track) -> Option<()> {
+    let v = call(login, "GET", &format!("{MU}/lists/series/{}", t.media_id), None).ok()?;
+    t.status = v["list_id"].as_i64().unwrap_or(0);
+    t.last_read = v["status"]["chapter"].as_f64().unwrap_or(0.) as f32;
+    let rating = call(login, "GET", &format!("{MU}/series/{}/rating", t.media_id), None).ok();
+    t.score = rating.and_then(|r| r["rating"].as_f64()).unwrap_or(0.) as f32;
+    Some(())
+}
+
+fn mu_push(login: &Login, t: &mut Track) -> Result<(), String> {
+    let entry = json!([{ "series": { "id": t.media_id }, "list_id": t.status, "status": { "chapter": t.last_read as i64 } }]);
+    call(login, "POST", &format!("{MU}/lists/series/update"), Some(entry))?;
+    let url = format!("{MU}/series/{}/rating", t.media_id);
+    if t.score > 0. {
+        call(login, "PUT", &url, Some(json!({ "rating": t.score })))?;
+    } else {
+        // Fails when there was no rating, which is fine.
+        let _ = call(login, "DELETE", &url, None);
+    }
+    Ok(())
+}
+
+/// MangaUpdates titles come HTML-escaped.
+fn unescape(s: &str) -> String {
+    s.replace("&quot;", "\"").replace("&#039;", "'").replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 }
 
 fn mal_status_from(s: &str) -> i64 {
@@ -512,5 +735,18 @@ mod tests {
         let mut a = Track { tracker: ANILIST, ..Track::default() };
         set_score(&mut a, 8);
         assert_eq!((a.score, score_of(&a)), (80., 8));
+        let mut k = Track { tracker: KITSU, ..Track::default() };
+        set_score(&mut k, 7);
+        assert_eq!((k.score, score_of(&k)), (14., 7));
+    }
+
+    #[test]
+    fn mangaupdates_counts_lists_from_zero() {
+        // Wish list is 1 and reading is 0 there.
+        let mut t = Track { tracker: MANGAUPDATES, status: 1, ..Track::default() };
+        assert!(advance(&mut t, 2., 100));
+        assert_eq!((t.status, t.started), (0, 100));
+        assert_eq!(statuses(MANGAUPDATES).len(), 5, "no rereading");
+        assert_eq!(unescape("Kaguya-sama: Love Is War &amp; &quot;More&quot;"), "Kaguya-sama: Love Is War & \"More\"");
     }
 }

@@ -31,7 +31,7 @@ Nano is a free and open source manga reader for the desktop. It runs the same ex
 * Left to right, right to left and vertical reading, with a page scrubber and chapter list.
 * Per-series scanlator filters and migration to another source.
 * Cloudflare checks passed in a built-in web engine.
-* Mihon `.tachibk` backup and restore, [SyncYomi](https://github.com/syncyomi/syncyomi) sync, and MyAnimeList and AniList tracking.
+* Mihon `.tachibk` backup and restore, [SyncYomi](https://github.com/syncyomi/syncyomi) sync, and MyAnimeList, AniList, Kitsu and MangaUpdates tracking.
 * Bounded memory use, and a bundled Java runtime so there is nothing else to install.
 
 ## Download

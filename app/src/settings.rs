@@ -21,6 +21,10 @@ pub struct Settings {
     /// The tracker waiting on the browser, and what the last sign-in said.
     signing_in: Option<i64>,
     track_note: String,
+    /// The username and password tracker whose sign-in form is open.
+    login_open: Option<i64>,
+    login_user: Entity<TextInput>,
+    login_pass: Entity<TextInput>,
     /// What the last export or import said.
     backup_note: String,
     font_open: Option<usize>,
@@ -61,9 +65,15 @@ impl Settings {
         .detach();
         let new_category = plain("New category name", "", cx);
         cx.subscribe(&new_category, |this, _, _: &InputEvent, cx| this.add_category(cx)).detach();
+        let login_user = plain("Username or email", "", cx);
+        let login_pass = plain("Password", "", cx);
+        login_pass.update(cx, |i, _| i.secret = true);
+        for input in [&login_user, &login_pass] {
+            cx.subscribe(input, |this, _, _: &InputEvent, cx| this.password_sign_in(cx)).detach();
+        }
         let font_search = plain("Search Google Fonts", "", cx);
         cx.observe(&font_search, |this, _, cx| this.filter_fonts(cx)).detach();
-        Settings { store, covers_cleared: false, pages_cleared: false, sync_host, sync_key, solver, new_category, signing_in: None, track_note: String::new(), backup_note: String::new(), font_open: None, font_files: vec![], font_matches: vec![], font_search, downloading: vec![], font_failed: None }
+        Settings { store, covers_cleared: false, pages_cleared: false, sync_host, sync_key, solver, new_category, signing_in: None, track_note: String::new(), login_open: None, login_user, login_pass, backup_note: String::new(), font_open: None, font_files: vec![], font_matches: vec![], font_search, downloading: vec![], font_failed: None }
     }
 
     fn add_category(&mut self, cx: &mut Context<Self>) {
@@ -74,6 +84,37 @@ impl Settings {
             cx.notify();
         });
         crate::sync::run(self.store.clone(), cx);
+    }
+
+    /// Sends what's typed in the sign-in form to Kitsu or MangaUpdates.
+    fn password_sign_in(&mut self, cx: &mut Context<Self>) {
+        let Some(tracker) = self.login_open.filter(|_| self.signing_in.is_none()) else { return };
+        let (user, pass) = (self.login_user.read(cx).text.trim().to_string(), self.login_pass.read(cx).text.clone());
+        if user.is_empty() || pass.is_empty() {
+            return;
+        }
+        self.signing_in = Some(tracker);
+        self.track_note = format!("Signing in to {}…", crate::track::name(tracker));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { crate::track::password_login(tracker, &user, &pass) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.signing_in = None;
+                this.track_note = match result {
+                    Ok(login) => {
+                        this.store.update(cx, |s, cx| s.set_login(tracker, Some(login), cx));
+                        this.login_open = None;
+                        for input in [&this.login_user, &this.login_pass] {
+                            input.update(cx, |i, _| i.text.clear());
+                        }
+                        String::new()
+                    }
+                    Err(e) => e,
+                };
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Opens the site's sign-in page and waits on its own thread for the browser to come back.
@@ -803,6 +844,7 @@ impl Render for Settings {
             let waiting = self.signing_in == Some(tracker);
             let note = match &user {
                 Some(name) => format!("Signed in as {name}"),
+                None if waiting && crate::track::uses_password(tracker) => "Signing in…".into(),
                 None if waiting => "Waiting for the browser…".into(),
                 None => "Not signed in".into(),
             };
@@ -810,18 +852,45 @@ impl Render for Settings {
                 Some(_) => small_button(("tracker-out", tracker as usize), "Sign out", false).on_click(cx.listener(move |this, _, _, cx| {
                     this.store.update(cx, |s, cx| s.set_login(tracker, None, cx))
                 })),
-                None => small_button(("tracker-in", tracker as usize), "Sign in", true).on_click(cx.listener(move |this, _, _, cx| this.sign_in(tracker, cx))),
+                None => small_button(("tracker-in", tracker as usize), "Sign in", true).on_click(cx.listener(move |this, _, window, cx| {
+                    if crate::track::uses_password(tracker) {
+                        this.login_open = Some(tracker);
+                        this.track_note.clear();
+                        this.login_user.update(cx, |i, cx| i.focus(window, cx));
+                        cx.notify();
+                    } else {
+                        this.sign_in(tracker, cx)
+                    }
+                })),
             };
+            let form = (self.login_open == Some(tracker) && user.is_none()).then(|| {
+                div()
+                    .pb(u(12.))
+                    .flex()
+                    .items_center()
+                    .gap(u(10.))
+                    .child(div().flex_1().min_w_0().child(self.login_user.clone()))
+                    .child(div().flex_1().min_w_0().child(self.login_pass.clone()))
+                    .child(small_button("tracker-submit", "Sign in", true).on_click(cx.listener(|this, _, _, cx| this.password_sign_in(cx))))
+                    .child(small_button("tracker-cancel", "Cancel", false).on_click(cx.listener(|this, _, _, cx| {
+                        this.login_open = None;
+                        cx.notify();
+                    })))
+            });
             div()
-                .py(u(12.))
-                .flex()
-                .items_center()
-                .gap_4()
                 .border_b_1()
                 .border_color(rgb(RULE))
-                .child(div().flex_1().min_w_0().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child(crate::track::name(tracker)))
-                .child(div().font_family(crate::fonts::mono()).text_size(u(12.)).text_color(rgb(FAINT)).child(note))
-                .child(button)
+                .child(
+                    div()
+                        .py(u(12.))
+                        .flex()
+                        .items_center()
+                        .gap_4()
+                        .child(div().flex_1().min_w_0().text_size(u(15.)).font_weight(FontWeight::SEMIBOLD).child(crate::track::name(tracker)))
+                        .child(div().font_family(crate::fonts::mono()).text_size(u(12.)).text_color(rgb(FAINT)).child(note))
+                        .child(button),
+                )
+                .children(form)
         });
         let tracking = div()
             .w_full()

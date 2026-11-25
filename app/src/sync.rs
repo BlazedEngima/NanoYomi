@@ -442,7 +442,7 @@ fn outgoing_since(s: &Series, old: Option<&Snapshot>, raw: Option<Raw>, now: i64
     (out, raw)
 }
 
-/// Replaces the tracks Nano handles. Trackers it doesn't (Kitsu and the rest) go back as they came.
+/// Replaces the tracks Nano handles. Trackers it doesn't (Shikimori and the rest) go back as they came.
 fn put_tracks(m: &mut Msg, tracks: &[Track]) {
     let entries: Vec<Msg> = m.all(M_TRACKING).filter_map(Msg::parse).collect();
     let mut kept: Vec<Msg> = entries.iter().filter(|e| !crate::track::TRACKERS.contains(&e.int(T_SYNC_ID))).cloned().collect();
@@ -1133,20 +1133,20 @@ mod tests {
 
     #[test]
     fn tracks_use_mihons_tracking_field() {
-        // The phone tracks it on MyAnimeList (with a field Nano doesn't know) and on Kitsu.
+        // The phone tracks it on MyAnimeList (with a field Nano doesn't know) and on Shikimori.
         let mut mal = Msg::default();
         mal.set_int(T_SYNC_ID, 1);
         mal.set_int(T_MEDIA_ID, 2);
         mal.set(T_LAST_READ, Val::Fixed32(4f32.to_bits()));
         mal.set_int(T_STATUS, 1);
         mal.set_int(500, 7);
-        let mut kitsu = Msg::default();
-        kitsu.set_int(T_SYNC_ID, 3);
-        kitsu.set_int(T_MEDIA_ID, 9);
+        let mut shiki = Msg::default();
+        shiki.set_int(T_SYNC_ID, 4);
+        shiki.set_int(T_MEDIA_ID, 9);
         let mut m = new_manga(&series());
         m.set_int(M_VERSION, 3);
         m.push(M_TRACKING, &mal);
-        m.push(M_TRACKING, &kitsu);
+        m.push(M_TRACKING, &shiki);
         let mut list = vec![];
         let (_, raw) = incoming(&mut list, &m, None, &HashMap::new(), false).unwrap();
         let s = &mut list[0];
@@ -1162,7 +1162,7 @@ mod tests {
         let by = |id: i64| sent.iter().find(|e| e.int(T_SYNC_ID) == id).cloned().unwrap();
         assert_eq!(sent.len(), 3);
         assert_eq!((by(1).f32(T_LAST_READ), by(1).int(500)), (6., 7), "unknown field kept");
-        assert_eq!(by(3), kitsu);
+        assert_eq!(by(4), shiki);
         assert_eq!((by(2).int(T_MEDIA_ID), by(2).int(T_STATUS)), (30, 5));
     }
 

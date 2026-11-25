@@ -20,6 +20,8 @@ pub struct TextInput {
     pub icon: bool,
     pub numeric: bool,
     pub compact: bool,
+    /// Shows dots instead of the text, for passwords.
+    pub secret: bool,
     back: usize,
     anchor: Option<usize>,
     dragging: bool,
@@ -38,6 +40,7 @@ impl TextInput {
             icon: true,
             numeric: false,
             compact: false,
+            secret: false,
             back: 0,
             anchor: None,
             dragging: false,
@@ -64,9 +67,15 @@ impl TextInput {
         (a != b).then_some((a.min(b), a.max(b)))
     }
 
+    /// What's drawn, which is dots for a secret.
+    fn shown(&self) -> String {
+        if self.secret { "•".repeat(self.text.chars().count()) } else { self.text.clone() }
+    }
+
     fn back_at(&self, x: Pixels) -> usize {
         let at = self.shaped.borrow().as_ref().map(|(left, line)| line.closest_index_for_x(x - *left));
-        at.filter(|&i| self.text.is_char_boundary(i)).map_or(0, |i| self.text[i..].chars().count())
+        let shown = self.shown();
+        at.filter(|&i| shown.is_char_boundary(i)).map_or(0, |i| shown[i..].chars().count())
     }
 
     fn delete_selection(&mut self) -> bool {
@@ -167,8 +176,11 @@ impl Render for TextInput {
         let focused = self.focus.is_focused(window);
         let selection = self.selection();
         let (from, to) = selection.unwrap_or((self.caret(), self.caret()));
-        let part = |range: std::ops::Range<usize>| SharedString::from(self.text[range].to_string());
-        let (before, middle, after) = (part(0..from), part(from..to), part(to..self.text.len()));
+        let shown = self.shown();
+        // Moves a byte offset in the text onto the dots.
+        let at = |b: usize| if self.secret { self.text[..b].chars().count() * '•'.len_utf8() } else { b };
+        let part = |range: std::ops::Range<usize>| SharedString::from(shown[range].to_string());
+        let (before, middle, after) = (part(0..at(from)), part(at(from)..at(to)), part(at(to)..shown.len()));
         div()
             .id("input")
             .track_focus(&self.focus)
@@ -218,7 +230,7 @@ impl Render for TextInput {
                 };
                 let empty = self.text.is_empty();
                 let highlight: Hsla = rgb(ACCENT).into();
-                let (shaped, text) = (self.shaped.clone(), SharedString::from(self.text.clone()));
+                let (shaped, text) = (self.shaped.clone(), SharedString::from(shown.clone()));
                 let measure = canvas(|_, _, _| (), move |bounds, _, window, _| {
                     if text.is_empty() {
                         *shaped.borrow_mut() = None;

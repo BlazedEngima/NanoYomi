@@ -40,20 +40,20 @@ pub struct Series {
     pub tracks: Vec<Track>,
 }
 
-/// A series on MyAnimeList or AniList. Mihon's BackupTracking fields, so sync carries them unchanged.
+/// A series on a tracker. Mihon's BackupTracking fields, so sync carries them unchanged.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 #[serde(default)]
 pub struct Track {
-    /// Mihon's tracker id: 1 MyAnimeList, 2 AniList.
+    /// Mihon's tracker id: 1 MyAnimeList, 2 AniList, 3 Kitsu, 7 MangaUpdates.
     pub tracker: i64,
-    /// AniList's list entry id. MyAnimeList has none.
+    /// AniList's or Kitsu's list entry id. The others have none.
     pub library_id: i64,
     pub media_id: i64,
     pub url: String,
     pub title: String,
     pub last_read: f32,
     pub total: i64,
-    /// 0 to 10 on MyAnimeList, 0 to 100 on AniList.
+    /// 0 to 10 on MyAnimeList and MangaUpdates, 2 to 20 on Kitsu, 0 to 100 on AniList.
     pub score: f32,
     pub status: i64,
     pub started: i64,

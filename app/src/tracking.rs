@@ -1,4 +1,4 @@
-//! The tracking drawer: find a series on MyAnimeList or AniList, then set its status, chapters and score.
+//! The tracking drawer: find a series on a tracker, then set its status, chapters and score.
 
 use crate::catalog::{chip, small_button};
 use crate::input::{InputEvent, TextInput};
