@@ -225,7 +225,7 @@ impl Library {
                             let known: std::collections::HashSet<String> = s.chapters.iter().filter_map(|c| c["url"].as_str().map(str::to_string)).collect();
                             // Only when the list was known before, or a first check would download everything.
                             let fresh = if auto && s.in_library && !known.is_empty() { chapters.iter().filter(|c| c["url"].as_str().is_some_and(|u| !known.contains(u))).cloned().collect() } else { vec![] };
-                            s.chapters = chapters;
+                            s.chapters = Arc::new(chapters);
                             // Within the scanlator filter, oldest first.
                             let visible = s.visible();
                             fresh.into_iter().filter(|c: &Value| visible.iter().any(|v| v["url"] == c["url"])).rev().collect::<Vec<Value>>()
@@ -258,7 +258,7 @@ impl Library {
         if s.chapters.is_empty() || !source.installed {
             return cx.emit(OpenManga { source, manga: s.manga.clone() });
         }
-        cx.emit(Resume { source, manga: s.manga.clone(), chapters: Arc::new(s.chapters.clone()), index, page });
+        cx.emit(Resume { source, manga: s.manga.clone(), chapters: s.chapters.clone(), index, page });
     }
 
     fn open(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -745,7 +745,7 @@ impl Render for Library {
             let area = if self.updates_page { crate::store::Area::Updates } else { crate::store::Area::Library };
             self.series = store.library().into_iter().filter(|s| !store.hides_series(area, s)).cloned().map(|mut s| {
                 // Chapters after the scanlator filter. Not saved.
-                s.chapters = s.visible();
+                s.chapters = Arc::new(s.visible());
                 s.hidden_scanlators.clear();
                 s
             }).collect();
@@ -753,7 +753,7 @@ impl Render for Library {
             let unread: Vec<usize> = self.series.iter().map(Series::unread).collect();
             self.unread_total = unread.iter().sum();
             let reading: Vec<Series> = store.history().into_iter().filter(|s| !store.hides_series(crate::store::Area::History, s)).take(3).cloned().map(|mut s| {
-                s.chapters = s.visible();
+                s.chapters = Arc::new(s.visible());
                 s.hidden_scanlators.clear();
                 s
             }).collect();

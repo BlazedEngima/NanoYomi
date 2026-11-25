@@ -368,7 +368,7 @@ impl Reader {
         self.store.update(cx, |store, cx| {
             store.update(&source.id, &source.name, &manga, cx, |s| {
                 if s.chapters.len() != chapters.len() {
-                    s.chapters = chapters.to_vec();
+                    s.chapters = chapters;
                 }
                 s.progress = Some(progress);
             })

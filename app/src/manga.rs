@@ -162,7 +162,7 @@ impl MangaView {
             store,
             covers: Covers::default(),
             manga,
-            chapters: Arc::new(local.clone().or_else(|| saved.as_ref().map(|s| s.chapters.clone())).unwrap_or_default()),
+            chapters: local.clone().map(Arc::new).or_else(|| saved.as_ref().map(|s| s.chapters.clone())).unwrap_or_default(),
             hidden: if local.is_some() { vec![] } else { saved.as_ref().map(|s| s.hidden()).unwrap_or_default() },
             chosen: local.is_some() || saved.as_ref().is_some_and(|s| s.scanlators_chosen),
             local: local.is_some(),
@@ -203,7 +203,7 @@ impl MangaView {
             if store.get(&source.id, manga["url"].as_str().unwrap_or_default()).is_some() {
                 store.update(&source.id, &source.name, &manga, cx, |s| {
                     s.manga = manga.clone();
-                    s.chapters = chapters.to_vec();
+                    s.chapters = chapters;
                     s.hidden_scanlators = hidden;
                     s.scanlators_chosen = chosen;
                     f(s);

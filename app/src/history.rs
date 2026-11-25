@@ -82,7 +82,7 @@ impl History {
                 let s = &this.rows[i];
                 let (Some(source), Some(index)) = (this.registry.read(cx).source(&s.source), s.reading_index()) else { return };
                 let page = s.progress.as_ref().map_or(0, |p| p.page);
-                cx.emit(Resume { source, manga: s.manga.clone(), chapters: Arc::new(s.chapters.clone()), index, page });
+                cx.emit(Resume { source, manga: s.manga.clone(), chapters: s.chapters.clone(), index, page });
             }))
             .into_any_element()
     }
@@ -98,7 +98,7 @@ impl Render for History {
             .cloned()
             .map(|mut s| {
                 // Chapters after the scanlator filter. Not saved.
-                s.chapters = s.visible();
+                s.chapters = Arc::new(s.visible());
                 s.hidden_scanlators.clear();
                 s
             })

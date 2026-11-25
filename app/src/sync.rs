@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(default)]
@@ -525,10 +526,11 @@ fn incoming_from(series: &mut Vec<Series>, m: &Msg, raw: Option<Raw>, source_nam
     if s.chapters.is_empty() {
         let mut list: Vec<&Msg> = raw.chapters.values().collect();
         list.sort_by_key(|c| c.int(C_ORDER));
-        s.chapters = list
-            .iter()
-            .map(|c| json!({ "url": c.str(C_URL), "name": c.str(C_NAME), "scanlator": c.str(C_SCANLATOR), "chapterNumber": c.f32(C_NUMBER), "dateUpload": c.int(C_UPLOAD) }))
-            .collect();
+        s.chapters = Arc::new(
+            list.iter()
+                .map(|c| json!({ "url": c.str(C_URL), "name": c.str(C_NAME), "scanlator": c.str(C_SCANLATOR), "chapterNumber": c.f32(C_NUMBER), "dateUpload": c.int(C_UPLOAD) }))
+                .collect(),
+        );
     }
     s.in_library = favorite;
     if favorite && s.added_at == 0 {
@@ -1067,7 +1069,7 @@ mod tests {
 
     fn series() -> Series {
         let mut s = Series::new("7537715367149829912".into(), "Comix".into(), json!({ "url": "/m", "title": "T" }));
-        s.chapters = (0..4).rev().map(|i| json!({ "url": format!("/c{i}"), "name": format!("Ch.{i}") })).collect();
+        s.chapters = Arc::new((0..4).rev().map(|i| json!({ "url": format!("/c{i}"), "name": format!("Ch.{i}") })).collect());
         s
     }
 
