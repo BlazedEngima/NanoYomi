@@ -128,7 +128,9 @@ impl MangaView {
             cx.observe(&downloads, |this, downloads, cx| this.on_downloads(downloads, cx)),
         ];
         let call_source = source.clone();
-        let request = json!({ "manga": manga, "chapters": [] });
+        let req_manga = saved.as_ref().map_or(&manga, |s| &s.manga);
+        let req_chapters: &[Value] = saved.as_ref().map_or(&[], |s| s.chapters.as_slice());
+        let request = json!({ "manga": req_manga, "chapters": req_chapters });
         let installed = source.installed && !is_local;
         cx.spawn(async move |this, cx| {
             if !installed {

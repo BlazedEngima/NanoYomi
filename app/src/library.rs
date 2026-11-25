@@ -206,21 +206,21 @@ shelf_shape: (false, false),
 
     // Checks once per launch. Might need a timer if Nano stays open for days.
     fn check_for_updates(&mut self, cx: &mut Context<Self>) {
-        let targets: Vec<(Source, Value)> = {
+        let targets: Vec<(Source, Value, Arc<Vec<Value>>)> = {
             let registry = self.registry.read(cx);
-            self.store.read(cx).library().iter().filter_map(|s| Some((registry.source(&s.source)?, s.manga.clone()))).collect()
+            self.store.read(cx).library().iter().filter_map(|s| Some((registry.source(&s.source)?, s.manga.clone(), s.chapters.clone()))).collect()
         };
         if targets.is_empty() {
             return;
         }
         let total = targets.len();
         cx.spawn(async move |this, cx| {
-            for (done, (source, manga)) in targets.into_iter().enumerate() {
+            for (done, (source, manga, existing_chapters)) in targets.into_iter().enumerate() {
                 let _ = this.update(cx, |this, cx| {
                     this.checking = Some((done, total));
                     cx.notify();
                 });
-                let result = source.call(cx, "update", json!({ "manga": manga, "chapters": [], "needsDetails": false })).await;
+                let result = source.call(cx, "update", json!({ "manga": manga, "chapters": existing_chapters.as_slice(), "needsDetails": false })).await;
                 let Ok(v) = result else { continue };
                 let chapters = v["chapters"].as_array().cloned().unwrap_or_default();
                 let _ = this.update(cx, |this, cx| {
