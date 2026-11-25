@@ -156,7 +156,8 @@ impl Series {
         self.visible().iter().position(|c| c["url"] == p.chapter_url.as_str())
     }
 
-    /// How far through the series you are, from 0 to 1. The current chapter counts by page.
+    /// How far through the series you are, from 0 to 1. The current chapter counts by page. Kept to check `stats_of` against.
+    #[cfg(test)]
     pub fn read_fraction(&self) -> Option<f32> {
         let p = self.progress.as_ref()?;
         let total = self.visible().len();
@@ -192,6 +193,7 @@ impl Series {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn caught_up(&self) -> bool {
         let list = self.visible();
         (self.progress.is_some() || !self.marks.is_empty()) && !list.is_empty() && self.read_flags(&list).iter().all(|r| *r)
