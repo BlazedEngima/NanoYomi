@@ -22,7 +22,7 @@ const BOOTSTRAP: &str = r#"(() => {
   if (window !== window.top && !window.webkit) return;
   const post = (m) => { try { (window.webkit ? window.webkit.messageHandlers.ipc : window.ipc).postMessage(JSON.stringify(m)); } catch (e) {} };
   Object.defineProperty(window, '__yomiPost', { value: post });
-  // Android's shouldInterceptRequest. fetch() waits for the extension's answer, XMLHttpRequest is only reported.
+  // Android's shouldInterceptRequest. fetch() and async XMLHttpRequest wait for the extension's answer, sync XHR is only reported.
   const absolute = (url) => { try { return new URL(url, location.href).href; } catch (e) { return String(url); } };
   const pending = new Map();
   // Ids are unique across frames, so an answer can go to every frame.
@@ -54,8 +54,48 @@ const BOOTSTRAP: &str = r#"(() => {
       return new Response(decode(a), { status: a.status || 200, statusText: a.reason || 'OK', headers: a.headers || {} });
     });
   };
-  const open0 = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function (method, url) { try { post({ t: 'request', url: absolute(url), method: String(method || 'GET').toUpperCase(), main: false }); } catch (e) {} return open0.apply(this, arguments); };
+  const ask = (url, method) => {
+    const id = newId();
+    const answer = new Promise((resolve) => { pending.set(id, resolve); setTimeout(() => window.__yomiIntercepted(id, null), 60000); });
+    post({ t: 'request', id, url, method, main: false });
+    return answer;
+  };
+  const XHR = XMLHttpRequest.prototype, open0 = XHR.open, send0 = XHR.send, abort0 = XHR.abort;
+  const req = new WeakMap();
+  XHR.open = function (method, url, async) {
+    req.set(this, { url: absolute(url), method: String(method || 'GET').toUpperCase(), async: async !== false });
+    return open0.apply(this, arguments);
+  };
+  XHR.abort = function () { const r = req.get(this); if (r) r.aborted = true; return abort0.apply(this, arguments); };
+  // An answered request looks finished to the page, as when Android serves the extension's response.
+  const finish = (xhr, r, a) => {
+    const body = a.error ? new Uint8Array() : decode(a);
+    const text = new TextDecoder().decode(body);
+    const headers = a.headers || {};
+    const type = xhr.responseType;
+    let response = text;
+    if (type === 'json') { try { response = JSON.parse(text); } catch (e) { response = null; } }
+    else if (type === 'arraybuffer') response = body.buffer;
+    else if (type === 'blob') response = new Blob([body], { type: headers['Content-Type'] || headers['content-type'] || '' });
+    const fixed = { readyState: 4, status: a.error ? 0 : a.status || 200, statusText: a.error ? '' : a.reason || 'OK', responseURL: r.url, response, responseText: type === '' || type === 'text' ? text : '' };
+    for (const k in fixed) Object.defineProperty(xhr, k, { configurable: true, get: () => fixed[k] });
+    const lines = Object.keys(headers).map((k) => k.toLowerCase() + ': ' + headers[k]).join('\r\n');
+    xhr.getAllResponseHeaders = () => (a.error ? '' : lines);
+    xhr.getResponseHeader = (n) => { const k = Object.keys(headers).find((h) => h.toLowerCase() === String(n).toLowerCase()); return a.error || k === undefined ? null : String(headers[k]); };
+    for (const e of ['readystatechange', a.error ? 'error' : 'load', 'loadend']) xhr.dispatchEvent(new ProgressEvent(e));
+  };
+  XHR.send = function () {
+    const r = req.get(this), self = this, args = arguments;
+    if (!r || !r.async) {
+      if (r) post({ t: 'request', url: r.url, method: r.method, main: false });
+      return send0.apply(this, args);
+    }
+    ask(r.url, r.method).then((a) => {
+      if (r.aborted) return;
+      if (!a) return send0.apply(self, args);
+      finish(self, r, a);
+    });
+  };
   for (const level of ['log', 'info', 'warn', 'error', 'debug']) {
     const original = console[level];
     console[level] = function (...args) {
