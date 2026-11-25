@@ -129,10 +129,9 @@ fn frame(body: Div, tiling: Tiling) -> AnyElement {
         .bg(transparent_black())
         .child(
             canvas(
-                |_, window, _| window.insert_hitbox(Bounds::new(point(px(0.), px(0.)), window.window_bounds().get_bounds().size), HitboxBehavior::Normal),
+                |_, window, _| window.insert_hitbox(Bounds::new(point(px(0.), px(0.)), window.viewport_size()), HitboxBehavior::Normal),
                 move |_, hitbox, window, _| {
-                    let size = window.window_bounds().get_bounds().size;
-                    if let Some(edge) = resize_edge(window.mouse_position(), inset, size) {
+                    if let Some(edge) = resize_edge(window, window.mouse_position(), inset, tiling) {
                         window.set_cursor_style(cursor(edge), &hitbox);
                     }
                 },
@@ -146,8 +145,7 @@ fn frame(body: Div, tiling: Tiling) -> AnyElement {
         .when(!tiling.right, |d| d.pr(inset))
         .on_mouse_move(|_, window, _| window.refresh())
         .on_mouse_down(MouseButton::Left, move |e, window, _| {
-            let size = window.window_bounds().get_bounds().size;
-            if let Some(edge) = resize_edge(e.position, inset, size) {
+            if let Some(edge) = resize_edge(window, e.position, inset, tiling) {
                 window.start_window_resize(edge);
             }
         })
@@ -173,8 +171,19 @@ fn cursor(edge: ResizeEdge) -> CursorStyle {
     }
 }
 
-fn resize_edge(pos: Point<Pixels>, inset: Pixels, size: Size<Pixels>) -> Option<ResizeEdge> {
-    let (top, bottom, left, right) = (pos.y < inset, pos.y > size.height - inset, pos.x < inset, pos.x > size.width - inset);
+/// `window_bounds()` is the size to restore to while maximized or fullscreen, not the current one, so use the viewport.
+/// A maximized or fullscreen window has no edges to drag, and neither does a side that's tiled against something.
+fn resize_edge(window: &Window, pos: Point<Pixels>, inset: Pixels, tiling: Tiling) -> Option<ResizeEdge> {
+    if window.is_maximized() || window.is_fullscreen() {
+        return None;
+    }
+    let size = window.viewport_size();
+    let (top, bottom, left, right) = (
+        !tiling.top && pos.y < inset,
+        !tiling.bottom && pos.y > size.height - inset,
+        !tiling.left && pos.x < inset,
+        !tiling.right && pos.x > size.width - inset,
+    );
     Some(match (top, bottom, left, right) {
         (true, _, true, _) => ResizeEdge::TopLeft,
         (true, _, _, true) => ResizeEdge::TopRight,
