@@ -49,9 +49,10 @@ use images::ImageCache;
 use manga::{MangaEvent, MangaView};
 use reader::{Reader, ReaderEvent};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// mimalloc hands freed decode buffers back to macOS. The system allocator sat on 341 MB.
 #[global_allocator]
@@ -332,7 +333,77 @@ fn readable(e: &str) -> String {
     }
 }
 
+#[derive(Hash, PartialEq, Eq, Clone, Debug)]
+struct UpdateKey {
+    source: String,
+    url: String,
+    needs_details: bool,
+    needs_chapters: bool,
+    has_chapters: bool,
+}
+
+fn update_key(op: &str, params: &Value) -> Option<UpdateKey> {
+    if op != "update" {
+        return None;
+    }
+    Some(UpdateKey {
+        source: params["source"].as_str()?.to_string(),
+        url: params["manga"]["url"].as_str()?.to_string(),
+        needs_details: params["needsDetails"].as_bool().unwrap_or(true),
+        needs_chapters: params["needsChapters"].as_bool().unwrap_or(true),
+        has_chapters: params["chapters"].as_array().is_some_and(|a| !a.is_empty()),
+    })
+}
+
+type UpdateWaiters = HashMap<UpdateKey, Vec<futures::channel::oneshot::Sender<Result<Value, String>>>>;
+
+static INFLIGHT_UPDATES: LazyLock<Mutex<UpdateWaiters>> = LazyLock::new(Mutex::default);
+
+struct UpdateGuard(Option<UpdateKey>);
+
+impl Drop for UpdateGuard {
+    fn drop(&mut self) {
+        if let Some(key) = self.0.take() {
+            INFLIGHT_UPDATES.lock().unwrap().remove(&key);
+        }
+    }
+}
+
 async fn call_raw(host: &Arc<Host>, cx: &mut AsyncApp, op: &str, params: Value) -> Result<Value, String> {
+    let Some(key) = update_key(op, &params) else {
+        return call_raw_inner(host, cx, op, params).await;
+    };
+    loop {
+        let rx = {
+            let mut map = INFLIGHT_UPDATES.lock().unwrap();
+            if let Some(waiters) = map.get_mut(&key) {
+                let (tx, rx) = futures::channel::oneshot::channel();
+                waiters.push(tx);
+                Some(rx)
+            } else {
+                map.insert(key.clone(), Vec::new());
+                None
+            }
+        };
+        if let Some(rx) = rx {
+            if let Ok(res) = rx.await {
+                return res;
+            }
+            continue;
+        }
+        let mut guard = UpdateGuard(Some(key.clone()));
+        let res = call_raw_inner(host, cx, op, params).await;
+        guard.0 = None;
+        if let Some(waiters) = INFLIGHT_UPDATES.lock().unwrap().remove(&key) {
+            for tx in waiters {
+                let _ = tx.send(res.clone());
+            }
+        }
+        return res;
+    }
+}
+
+async fn call_raw_inner(host: &Arc<Host>, cx: &mut AsyncApp, op: &str, params: Value) -> Result<Value, String> {
     let mut first = host.call(op, params.clone()).await;
     // Opening a series while the Library checks it would ask twice at once, which extensions refuse. Wait instead.
     for _ in 0..60 {
@@ -391,11 +462,36 @@ async fn call_raw(host: &Arc<Host>, cx: &mut AsyncApp, op: &str, params: Value) 
 /// NANO_DEMO=<n> opens the nth popular series and pages through it (memory check).
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     #[test]
     fn errors_read_like_sentences() {
         assert_eq!(super::readable("eu.kanade.tachiyomi.network.HttpException: HTTP error 503\n\tat x"), "HTTP error 503");
         assert!(super::readable("eu.kanade.tachiyomi.network.HttpException: HTTP error 429").starts_with("The site is limiting"));
         assert_eq!(super::readable("Verification was cancelled"), "Verification was cancelled");
+    }
+
+    #[test]
+    fn update_key_matches_equivalent_requests_only() {
+        let req = |details: Option<bool>, chs: Vec<&str>| {
+            let mut v = json!({
+                "source": "7537715367149829912",
+                "manga": { "url": "/m/1" },
+                "chapters": chs.into_iter().map(|u| json!({ "url": u })).collect::<Vec<_>>(),
+            });
+            if let Some(d) = details {
+                v["needsDetails"] = json!(d);
+            }
+            v
+        };
+        assert!(super::update_key("pages", &req(None, vec![])).is_none());
+        let a = super::update_key("update", &req(None, vec!["/c1"])).unwrap();
+        let b = super::update_key("update", &req(Some(true), vec!["/c1", "/c2"])).unwrap();
+        let c = super::update_key("update", &req(Some(false), vec!["/c1"])).unwrap();
+        let d = super::update_key("update", &req(Some(true), vec![])).unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
     }
 }
 
