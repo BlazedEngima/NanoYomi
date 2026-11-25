@@ -209,9 +209,7 @@ impl WebViewHost {
     }
 
     fn handle(&mut self, msg: Value, window: &mut Window) -> bool {
-        if std::env::var_os("NANO_WV_DEBUG").is_some() {
-            eprintln!("wv> {}", truncate(&msg.to_string(), 300));
-        }
+        debug("wv>", &msg.to_string());
         let view = msg["view"].as_i64().unwrap_or(-1);
         let s = |k: &str| msg[k].as_str().unwrap_or_default().to_string();
         let op = s("wv");
@@ -385,9 +383,7 @@ impl WebViewHost {
                 }
                 m["wvEvent"] = kind.into();
                 m["view"] = view.into();
-                if std::env::var_os("NANO_WV_DEBUG").is_some() {
-                    eprintln!("wv< {}", truncate(&m.to_string(), 300));
-                }
+                debug("wv<", &m.to_string());
                 ipc_host.notify(&m);
             })
             .with_on_page_load_handler(move |event, url| {
@@ -395,13 +391,12 @@ impl WebViewHost {
                     wry::PageLoadEvent::Started => "pageStarted",
                     wry::PageLoadEvent::Finished => "pageFinished",
                 };
-                if std::env::var_os("NANO_WV_DEBUG").is_some() {
-                    eprintln!("wv< {kind} {view} {url}");
-                }
+                debug("wv<", &format!("{kind} {view} {url}"));
                 load_host.notify(&json!({ "wvEvent": kind, "view": view, "url": url }));
             })
             .build_as_child(window)?;
         native::keep_running_hidden(&wv);
+        native::prepare_image_blocker();
         Ok(wv)
     }
 }
@@ -791,6 +786,15 @@ fn origin_check(rules: &[String]) -> String {
         })
         .collect();
     if checks.is_empty() { "false".into() } else { checks.join(" || ") }
+}
+
+/// With NANO_WV_DEBUG set, logs a message with seconds since the first one, to see gaps between requests.
+fn debug(dir: &str, text: &str) {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    if std::env::var_os("NANO_WV_DEBUG").is_some() {
+        let t = START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64();
+        eprintln!("[{t:9.3}] {dir} {}", truncate(text, 300));
+    }
 }
 
 fn truncate(s: &str, n: usize) -> &str {
