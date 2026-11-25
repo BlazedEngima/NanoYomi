@@ -1115,6 +1115,7 @@ mod tests {
 
         // Read on into /c2 here.
         s.chapters = series().chapters;
+        s.mark(&["/c1".into()], true);
         s.progress = Some(Progress { chapter_url: "/c2".into(), chapter_name: "Ch.2".into(), page: 1, pages: 10, at: 4000 });
         assert!(dirty(s));
         let (out, _) = outgoing(s, Some(raw), 5000);
@@ -1188,6 +1189,7 @@ mod tests {
 
         // Here: unread /c3 again, bookmark /c0, unbookmark /c2.
         s.mark(&["/c3".into()], false);
+        s.mark(&["/c0".into()], true);
         s.toggle_bookmark("/c0");
         s.toggle_bookmark("/c2");
         let (out, _) = outgoing(s, Some(raw), 9000);
@@ -1226,6 +1228,7 @@ mod tests {
         s.added_at = 1234;
         s.categories = vec![2];
         s.progress = Some(Progress { chapter_url: "/c1".into(), chapter_name: "Ch.1".into(), page: 4, pages: 9, at: 777 });
+        s.mark(&["/c0".into()], true);
         s.bookmarks.insert("/c3".into());
         s.tracks.push(Track { tracker: 2, media_id: 30, status: 1, ..Track::default() });
         let m = backup_manga(&s, None);
@@ -1309,6 +1312,7 @@ mod tests {
         let s = &mut list[0];
         assert!(!dirty1(s), "just came from there");
         s.chapters = series().chapters;
+        s.mark(&["/c1".into()], true);
         s.progress = Some(Progress { chapter_url: "/c2".into(), chapter_name: "Ch.2".into(), page: 1, pages: 10, at: 4000 });
         assert!(dirty1(s));
 
