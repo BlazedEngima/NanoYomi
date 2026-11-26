@@ -793,13 +793,15 @@ pub(crate) mod native {
         if std::env::var_os("NANO_WV_DEBUG").is_some() {
             wv.webview().connect_resource_load_started(|_, resource, _| {
                 let uri = resource.uri().map(|u| u.to_string()).unwrap_or_default();
-                if !uri.contains("/api/") {
-                    return;
-                }
                 let u = uri.clone();
                 resource.connect_finished(move |r| {
-                    let code = r.response().map_or(0, |x| x.status_code());
-                    super::debug("wk", &format!("{code} {u}"));
+                    let res = r.response();
+                    let code = res.as_ref().map_or(0, |x| x.status_code());
+                    let head = |k: &str| res.as_ref().and_then(|x| x.http_headers()).and_then(|h| h.one(k)).map(|v| v.to_string()).unwrap_or_default();
+                    if code < 400 && !head("content-type").contains("text/html") && !u.contains("/api/") {
+                        return;
+                    }
+                    super::debug("wk", &format!("{code} {u} mitigated={} type={} server={}", head("cf-mitigated"), head("content-type"), head("server")));
                 });
                 resource.connect_failed(move |_, e| super::debug("wk", &format!("failed {uri}: {e}")));
             });
