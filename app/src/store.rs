@@ -38,6 +38,9 @@ pub struct Series {
     /// Tracker entries, as Mihon's backup keeps them.
     #[serde(default)]
     pub tracks: Vec<Track>,
+    /// Timestamp of the last explicit history clear, so sync does not resurrect older progress.
+    #[serde(default)]
+    pub history_cleared_at: i64,
 }
 
 /// A series on a tracker. Mihon's BackupTracking fields, so sync carries them unchanged.
@@ -74,7 +77,7 @@ pub struct Category {
     pub version: i64,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct Progress {
     pub chapter_url: String,
     pub chapter_name: String,
@@ -101,12 +104,17 @@ impl Series {
             bookmarks: Default::default(),
             categories: vec![],
             tracks: vec![],
+            history_cleared_at: 0,
         }
     }
 
     /// In the library, read, or with an unsynced change.
     fn kept(&self) -> bool {
-        self.in_library || self.progress.is_some() || !self.marks.is_empty() || !self.bookmarks.is_empty() || crate::sync::unsent(self)
+        self.in_library
+            || self.progress.is_some()
+            || !self.marks.is_empty()
+            || !self.bookmarks.is_empty()
+            || crate::sync::unsent(self)
     }
 
     pub fn url(&self) -> &str {
@@ -318,13 +326,23 @@ pub struct Nsfw {
 
 impl Default for Nsfw {
     fn default() -> Self {
-        Nsfw { all: false, mixed: true, library: false, updates: false, history: false, downloaded: false, sources: false, extensions: false }
+        Nsfw {
+            all: false,
+            mixed: true,
+            library: false,
+            updates: false,
+            history: false,
+            downloaded: false,
+            sources: false,
+            extensions: false,
+        }
     }
 }
 
 impl Nsfw {
     pub fn get(&self, area: Area) -> bool {
-        self.all || match area {
+        self.all
+            || match area {
             Area::Library => self.library,
             Area::Updates => self.updates,
             Area::History => self.history,
@@ -377,6 +395,7 @@ pub enum SyncStatus {
 
 pub struct Store {
     path: PathBuf,
+    history_undo_gen: u64,
     data: Data,
     saving: bool,
     pub sync_status: SyncStatus,
@@ -384,35 +403,58 @@ pub struct Store {
     pub track_error: Option<String>,
     pub update: Option<crate::update::Update>,
     pub update_note: &'static str,
+    history_undo: Vec<HistoryEntry>,
 }
 
 pub fn now_ms() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 impl Store {
     pub fn load(path: PathBuf) -> Self {
         let data = std::fs::read(&path)
             .ok()
-            .and_then(|b| serde_json::from_slice(&b).map_err(|e| eprintln!("{}: {e}", path.display())).ok())
+            .and_then(|b| {
+                serde_json::from_slice(&b)
+                    .map_err(|e| eprintln!("{}: {e}", path.display()))
+                    .ok()
+            })
             .unwrap_or_default();
-        Store { path, data, saving: false, sync_status: SyncStatus::Idle, track_error: None, update: None, update_note: "" }
+        Store {
+            history_undo_gen: 0,
+            path,
+            data,
+            saving: false,
+            sync_status: SyncStatus::Idle,
+            track_error: None,
+            update: None,
+            update_note: "",
+            history_undo: vec![],
+        }
     }
 
     pub fn get(&self, source: &str, url: &str) -> Option<&Series> {
-        self.data.series.iter().find(|s| s.source == source && s.url() == url)
+        self.data
+            .series
+            .iter()
+            .find(|s| s.source == source && s.url() == url)
     }
 
     /// Whether series from this source stay out of `area`.
     pub fn hides(&self, area: Area, source: &str) -> bool {
         let p = &self.data.prefs;
-        p.nsfw.get(area) && (p.nsfw_sources.iter().any(|s| s == source) || (p.nsfw.mixed && p.mixed_sources.iter().any(|s| s == source)))
+        p.nsfw.get(area)
+            && (p.nsfw_sources.iter().any(|s| s == source)
+                || (p.nsfw.mixed && p.mixed_sources.iter().any(|s| s == source)))
     }
 
     /// Whether a series stays out of `area`, because of its source or because it's in a category marked NSFW.
     pub fn hides_series(&self, area: Area, s: &Series) -> bool {
         let p = &self.data.prefs;
-        self.hides(area, &s.source) || (p.nsfw.get(area) && s.categories.iter().any(|c| p.nsfw_categories.contains(c)))
+        self.hides(area, &s.source)
+            || (p.nsfw.get(area) && s.categories.iter().any(|c| p.nsfw_categories.contains(c)))
     }
 
     /// Whether the category's tab is left off the Library page.
@@ -428,7 +470,12 @@ impl Store {
     }
 
     pub fn history(&self) -> Vec<&Series> {
-        let mut list: Vec<_> = self.data.series.iter().filter(|s| s.progress.is_some()).collect();
+        let mut list: Vec<_> = self
+            .data
+            .series
+            .iter()
+            .filter(|s| s.progress.is_some())
+            .collect();
         list.sort_by_key(|s| -s.progress.as_ref().map_or(0, |p| p.at));
         list
     }
@@ -450,9 +497,11 @@ impl Store {
             }
         };
         let before = self.data.series[ix].read_number();
+        let before_progress = self.data.series[ix].progress.clone();
         let out = f(&mut self.data.series[ix]);
         let s = &mut self.data.series[ix];
         let after = s.read_number();
+        let after_progress = s.progress.clone();
         if after > before {
             let now = now_ms();
             let moved: Vec<usize> = (0..s.tracks.len()).filter(|&i| crate::track::advance(&mut s.tracks[i], after, now)).collect();
@@ -464,6 +513,9 @@ impl Store {
                 }
             }
         }
+        if after_progress.is_some() && after_progress != before_progress {
+            self.history_undo.clear();
+        }
         self.data.series.retain(Series::kept);
         self.save_soon(cx);
         cx.notify();
@@ -471,18 +523,80 @@ impl Store {
     }
 
     pub fn dir(&self) -> std::path::PathBuf {
-        self.path.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+        self.path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default()
     }
 
     pub fn all_series(&self) -> &[Series] {
         &self.data.series
     }
 
-    pub fn edit_series(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Vec<Series>)) {
-        f(&mut self.data.series);
+    pub fn edit_series<T>(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Vec<Series>) -> T,
+    ) -> T {
+        let out = f(&mut self.data.series);
         self.data.series.retain(Series::kept);
         self.save_soon(cx);
         cx.notify();
+        out
+    }
+
+    pub fn history_undo(&self) -> &[HistoryEntry] {
+        &self.history_undo
+    }
+
+    pub fn remove_from_history(&mut self, source: &str, url: &str, cx: &mut Context<Self>) {
+        let at = now_ms();
+        if let Some(entry) =
+            self.edit_series(cx, |series| clear_progress_for(series, source, url, at))
+        {
+            self.history_undo.push(entry);
+            self.schedule_undo_dismiss(cx);
+        }
+    }
+
+    /// Clears reading progress from all series and appends lightweight snapshots for Undo.
+    pub fn clear_history(&mut self, cx: &mut Context<Self>) {
+        let at = now_ms();
+        let cleared = self.edit_series(cx, |series| clear_all_progress(series, at));
+        if !cleared.is_empty() {
+            self.history_undo.extend(cleared);
+            self.schedule_undo_dismiss(cx);
+        }
+    }
+
+    /// Restores series progress from the current Undo snapshot without overwriting newer reading progress.
+    pub fn undo_history(&mut self, cx: &mut Context<Self>) {
+        if self.history_undo.is_empty() {
+            return;
+        }
+        let saved = std::mem::take(&mut self.history_undo);
+        self.edit_series(cx, |series| restore_progress_entries(series, saved));
+    }
+
+    pub fn dismiss_history_undo(&mut self, cx: &mut Context<Self>) {
+        if !self.history_undo.is_empty() {
+            self.history_undo.clear();
+            cx.notify();
+        }
+    }
+
+    fn schedule_undo_dismiss(&mut self, cx: &mut Context<Self>) {
+        self.history_undo_gen = self.history_undo_gen.wrapping_add(1);
+        let stamp = self.history_undo_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(8)).await;
+            let _ = this.update(cx, |s, cx| {
+                if s.history_undo_gen == stamp {
+                    s.dismiss_history_undo(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn sync_config(&self) -> &crate::sync::Config {
@@ -499,7 +613,11 @@ impl Store {
         self.data.sync.key = key.into();
         self.data.sync.cursor = 0;
         self.data.sync.v1_etag.clear();
-        self.edit_series(cx, |series| series.iter_mut().for_each(|s| (s.sync, s.sync1) = (None, None)));
+        self.edit_series(cx, |series| {
+            series
+                .iter_mut()
+                .for_each(|s| (s.sync, s.sync1) = (None, None))
+        });
     }
 
     pub fn set_v1_etag(&mut self, etag: String, cx: &mut Context<Self>) {
@@ -654,7 +772,12 @@ impl Store {
         self.data.trackers.get(&tracker)
     }
 
-    pub fn set_login(&mut self, tracker: i64, login: Option<crate::track::Login>, cx: &mut Context<Self>) {
+    pub fn set_login(
+        &mut self,
+        tracker: i64,
+        login: Option<crate::track::Login>,
+        cx: &mut Context<Self>,
+    ) {
         match login {
             Some(l) => self.data.trackers.insert(tracker, l),
             None => self.data.trackers.remove(&tracker),
@@ -698,7 +821,10 @@ impl Store {
     /// Replaces or adds a series' entry for that tracker, or removes it when `t.media_id` is 0.
     pub fn put_track(&mut self, key: &(String, String), t: Track, cx: &mut Context<Self>) {
         self.edit_series(cx, |series| {
-            if let Some(s) = series.iter_mut().find(|s| s.source == key.0 && s.url() == key.1) {
+            if let Some(s) = series
+                .iter_mut()
+                .find(|s| s.source == key.0 && s.url() == key.1)
+            {
                 s.tracks.retain(|x| x.tracker != t.tracker);
                 if t.media_id != 0 {
                     s.tracks.push(t);
@@ -782,6 +908,100 @@ impl Store {
     }
 }
 
+#[derive(Clone)]
+pub enum HistoryEntry {
+    /// Series stays in `data.series`, so only progress fields are kept for Undo.
+    Progress {
+        source: String,
+        url: String,
+        progress: Progress,
+        cleared_at: i64,
+    },
+    /// Series will be dropped by `Series::kept`, so keep the full record to re-insert on Undo.
+    Dropped(Box<Series>),
+}
+
+fn take_history_entry(s: &mut Series, at: i64) -> Option<HistoryEntry> {
+    let progress = s.progress.take()?;
+    let prev_cleared_at = s.history_cleared_at;
+    s.history_cleared_at = prev_cleared_at.max(at).max(progress.at);
+    if s.kept() {
+        Some(HistoryEntry::Progress {
+            source: s.source.clone(),
+            url: s.url().to_string(),
+            progress,
+            cleared_at: prev_cleared_at,
+        })
+    } else {
+        let mut snapshot = s.clone();
+        snapshot.progress = Some(progress);
+        snapshot.history_cleared_at = prev_cleared_at;
+        Some(HistoryEntry::Dropped(Box::new(snapshot)))
+    }
+}
+
+pub(crate) fn clear_progress_for(
+    series: &mut [Series],
+    source: &str,
+    url: &str,
+    at: i64,
+) -> Option<HistoryEntry> {
+    series
+        .iter_mut()
+        .find(|s| s.source == source && s.url() == url)
+        .and_then(|s| take_history_entry(s, at))
+}
+
+pub(crate) fn clear_all_progress(series: &mut [Series], at: i64) -> Vec<HistoryEntry> {
+    series
+        .iter_mut()
+        .filter_map(|s| take_history_entry(s, at))
+        .collect()
+}
+
+pub(crate) fn restore_progress_entries(series: &mut Vec<Series>, saved: Vec<HistoryEntry>) {
+    for entry in saved {
+        let (source, url, progress, cleared_at, dropped) = match entry {
+            HistoryEntry::Progress {
+                source,
+                url,
+                progress,
+                cleared_at,
+            } => (source, url, progress, cleared_at, None),
+            HistoryEntry::Dropped(mut old) => {
+                let Some(progress) = old.progress.take() else {
+                    continue;
+                };
+                let cleared_at = old.history_cleared_at;
+                (
+                    old.source.clone(),
+                    old.url().to_string(),
+                    progress,
+                    cleared_at,
+                    Some(old),
+                )
+            }
+        };
+        match series
+            .iter_mut()
+            .find(|s| s.source == source && s.url() == url)
+        {
+            Some(s) if s.progress.is_none() => {
+                s.progress = Some(progress);
+                s.history_cleared_at = cleared_at;
+            }
+            Some(_) => {} // read again after clearing; keep the newer progress
+            None => {
+                if let Some(mut old) = dropped {
+                    old.progress = Some(progress);
+                    old.history_cleared_at = cleared_at;
+                    series.push(*old);
+                }
+            }
+        }
+    }
+}
+
 pub fn ago(ms: i64, now: i64) -> String {
     let mins = (now - ms).max(0) / 60_000;
     match mins {
@@ -859,21 +1079,42 @@ mod tests {
     #[test]
     fn deleting_a_category_clears_its_nsfw_mark() {
         let mut store = Store::load(std::env::temp_dir().join("nano-no-such-library.json"));
-        let cat = |name: &str, order: i64| Category { name: name.into(), order, flags: 0, uid: order, version: 1 };
+        let cat = |name: &str, order: i64| Category {
+            name: name.into(),
+            order,
+            flags: 0,
+            uid: order,
+            version: 1,
+        };
         store.data.categories = vec![cat("Reading", 1), cat("Spicy", 2)];
         store.data.prefs.nsfw_categories = vec![2];
         store.drop_category(2);
         assert!(store.data.prefs.nsfw_categories.is_empty());
         // The next category gets number 2 again and starts unmarked.
-        let order = store.data.categories.iter().map(|c| c.order).max().map_or(1, |o| o + 1);
+        let order = store
+            .data
+            .categories
+            .iter()
+            .map(|c| c.order)
+            .max()
+            .map_or(1, |o| o + 1);
         assert!(!store.data.prefs.nsfw_categories.contains(&order));
     }
 
     #[test]
     fn marks_override_what_progress_implies() {
         let mut s = Series::new("1".into(), "S".into(), json!({ "url": "/m" }));
-        s.chapters = (0..5).rev().map(|i| json!({ "url": format!("/c{i}") })).collect();
-        s.progress = Some(Progress { chapter_url: "/c2".into(), chapter_name: "".into(), page: 0, pages: 4, at: 0 });
+        s.chapters = (0..5)
+            .rev()
+            .map(|i| json!({ "url": format!("/c{i}") }))
+            .collect();
+        s.progress = Some(Progress {
+            chapter_url: "/c2".into(),
+            chapter_name: "".into(),
+            page: 0,
+            pages: 4,
+            at: 0,
+        });
         assert_eq!(s.read_flags(&s.chapters), [false, false, false, true, true]); // c4 c3 c2 c1 c0
         assert_eq!(s.unread(), 2);
         s.mark(&["/c4".into(), "/c3".into()], true);
@@ -894,17 +1135,103 @@ mod tests {
     fn default_filter_keeps_the_main_or_current_group() {
         let ch = |url: &str, g: &str| json!({ "url": url, "scanlator": g });
         let chapters = vec![ch("/1", "A"), ch("/2", "B"), ch("/3", "B"), ch("/4", "")];
-        assert_eq!(default_hidden(&chapters, None), vec!["A".to_string(), "Unknown".to_string()]);
-        assert_eq!(default_hidden(&chapters, Some("/1")), vec!["B".to_string(), "Unknown".to_string()]);
+        assert_eq!(
+            default_hidden(&chapters, None),
+            vec!["A".to_string(), "Unknown".to_string()]
+        );
+        assert_eq!(
+            default_hidden(&chapters, Some("/1")),
+            vec!["B".to_string(), "Unknown".to_string()]
+        );
         assert!(default_hidden(&[], None).is_empty());
+    }
+
+    #[test]
+    fn clear_and_undo_history() {
+        let mut lib = Series::new("1".into(), "S".into(), json!({ "url": "/a" }));
+        lib.in_library = true;
+        lib.progress = Some(Progress {
+            chapter_url: "/c1".into(),
+            chapter_name: "Ch.1".into(),
+            page: 1,
+            pages: 5,
+            at: 100,
+        });
+
+        let mut transient = Series::new("1".into(), "S".into(), json!({ "url": "/b" }));
+        transient.progress = Some(Progress {
+            chapter_url: "/c2".into(),
+            chapter_name: "Ch.2".into(),
+            page: 2,
+            pages: 5,
+            at: 200,
+        });
+
+        let mut series = vec![lib, transient];
+        let single = clear_progress_for(&mut series, "1", "/b", 500).unwrap();
+        assert!(matches!(single, HistoryEntry::Dropped(_)));
+        series.retain(Series::kept);
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].url(), "/a");
+
+        // Undo re-inserts a dropped non-library series.
+        restore_progress_entries(&mut series, vec![single]);
+        assert_eq!(series.len(), 2);
+        assert_eq!(series[1].url(), "/b");
+        assert_eq!(series[1].progress.as_ref().map(|p| p.at), Some(200));
+
+        // Clear all produces Progress for library series and Dropped for transient ones.
+        let snapshot = clear_all_progress(&mut series, 600);
+        assert_eq!(snapshot.len(), 2);
+        series.retain(Series::kept);
+        assert_eq!(series.len(), 1);
+        assert!(series[0].in_library);
+        assert!(series[0].progress.is_none());
+        assert_eq!(series[0].history_cleared_at, 600);
+
+        // Reading /a again before Undo must not be overwritten by Undo.
+        series[0].progress = Some(Progress {
+            chapter_url: "/c9".into(),
+            chapter_name: "Ch.9".into(),
+            page: 0,
+            pages: 4,
+            at: 700,
+        });
+        restore_progress_entries(&mut series, snapshot);
+        assert_eq!(series.len(), 2, "dropped transient series is restored");
+        assert_eq!(
+            series[0].progress.as_ref().map(|p| p.chapter_url.as_str()),
+            Some("/c9")
+        );
+        // Sequential individual removals accumulate and restore together.
+        let e1 = clear_progress_for(&mut series, "1", "/a", 800).unwrap();
+        let e2 = clear_progress_for(&mut series, "1", "/b", 810).unwrap();
+        series.retain(Series::kept);
+        assert_eq!(series.len(), 1);
+        assert!(series[0].progress.is_none());
+        restore_progress_entries(&mut series, vec![e1, e2]);
+        assert_eq!(series.len(), 2);
+        assert_eq!(
+            series[0].progress.as_ref().map(|p| p.chapter_url.as_str()),
+            Some("/c9")
+        );
+        assert_eq!(
+            series[1].progress.as_ref().map(|p| p.chapter_url.as_str()),
+            Some("/c2")
+        );
     }
 }
 
 #[cfg(test)]
 #[test]
 fn prefs_read_from_old_files() {
-    let d: Data = serde_json::from_str(r#"{"series":[],"vertical_reader":true,"host_heap_mb":128}"#).unwrap();
+    let d: Data =
+        serde_json::from_str(r#"{"series":[],"vertical_reader":true,"host_heap_mb":128}"#).unwrap();
     assert!(d.prefs.vertical_reader && !d.prefs.auto_download);
     assert_eq!(d.prefs.host_heap_mb, Some(128));
-    assert!(serde_json::to_string(&d).unwrap().contains(r#""vertical_reader":true"#));
+    assert!(
+        serde_json::to_string(&d)
+            .unwrap()
+            .contains(r#""vertical_reader":true"#)
+    );
 }
