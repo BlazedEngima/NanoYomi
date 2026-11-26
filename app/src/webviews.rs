@@ -588,6 +588,12 @@ pub(crate) mod native {
 
     static BLOCK_IMAGES: LazyLock<Mutex<HashMap<i64, Arc<AtomicBool>>>> = LazyLock::new(Mutex::default);
 
+    /// Every handler on a view gets every request that matches any of its filters, so each one checks the kind it wants.
+    fn is_kind(args: &ICoreWebView2WebResourceRequestedEventArgs, kind: COREWEBVIEW2_WEB_RESOURCE_CONTEXT) -> bool {
+        let mut context = COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL;
+        unsafe { args.ResourceContext(&mut context) }.is_ok() && context == kind
+    }
+
     pub fn prepare_image_blocker() {}
 
     pub fn set_images(view: i64, wv: &WebView, allow_images: bool) {
@@ -604,7 +610,7 @@ pub(crate) mod native {
         let (webview, env) = (wv.webview(), wv.environment());
         let handler = WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else { return Ok(()) };
-            if !flag.load(Ordering::Relaxed) {
+            if !flag.load(Ordering::Relaxed) || !is_kind(&args, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_IMAGE) {
                 return Ok(());
             }
             unsafe {
@@ -648,7 +654,7 @@ pub(crate) mod native {
         // ponytail: each call leaves a spent handler behind; remove them by token if views ever load many documents.
         let handler = WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else { return Ok(()) };
-            if served.swap(true, Ordering::SeqCst) {
+            if !is_kind(&args, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT) || served.swap(true, Ordering::SeqCst) {
                 return Ok(());
             }
             unsafe {
