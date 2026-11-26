@@ -367,7 +367,7 @@ impl Reader {
         let (source, manga, chapters) = (self.source.clone(), self.manga.clone(), self.chapters.clone());
         self.store.update(cx, |store, cx| {
             store.update(&source.id, &source.name, &manga, cx, |s| {
-                if s.chapters.len() != chapters.len() {
+                if s.chapters.is_empty() {
                     s.chapters = chapters;
                 }
                 s.progress = Some(progress);
