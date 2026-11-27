@@ -467,9 +467,9 @@ struct Root {
 }
 
 impl Root {
-    fn new(host: Arc<Host>, data_dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(host: Arc<Host>, data_dir: PathBuf, store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cache = cx.new(|_| ImageCache::new(images::BUDGET_BYTES));
-        let store = cx.new(|_| Store::load(data_dir.join("library.json")));
+        let store = cx.new(|_| store);
         sync::run(store.clone(), cx);
         set_zoom(store.read(cx).zoom());
         downloads::apply(&store.read(cx).prefs().download_dir, store.read(cx).prefs().download_format);
@@ -865,7 +865,7 @@ fn main() {
                 window_decorations: decorations,
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| Root::new(host, data_dir, window, cx)),
+            |window, cx| cx.new(|cx| Root::new(host, data_dir, first, window, cx)),
         )
         .expect("open window");
         cx.activate(true);

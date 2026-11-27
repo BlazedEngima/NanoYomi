@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(default)]
@@ -136,8 +137,29 @@ impl Msg {
         Some(Msg(fields))
     }
 
+    fn encoded_len(&self) -> usize {
+        let varint_len = |x: u64| 1usize + (63 - x.max(1).leading_zeros() as usize) / 7;
+        let mut total = 0usize;
+        for (n, v) in &self.0 {
+            let wire = match v {
+                Val::Varint(_) => 0,
+                Val::Fixed64(_) => 1,
+                Val::Bytes(_) => 2,
+                Val::Fixed32(_) => 5,
+            };
+            total += varint_len(((*n as u64) << 3) | wire);
+            total += match v {
+                Val::Varint(x) => varint_len(*x),
+                Val::Fixed64(_) => 8,
+                Val::Bytes(x) => varint_len(x.len() as u64) + x.len(),
+                Val::Fixed32(_) => 4,
+            };
+        }
+        total
+    }
+
     fn encode(&self) -> Vec<u8> {
-        let mut out = vec![];
+        let mut out = Vec::with_capacity(self.encoded_len());
         for (n, v) in &self.0 {
             let wire = match v {
                 Val::Varint(_) => 0,
@@ -399,12 +421,15 @@ fn outgoing_since(s: &Series, old: Option<&Snapshot>, raw: Option<Raw>, now: i64
     let visible = s.visible();
     let read = s.read_flags(&visible);
     let p = s.progress.as_ref();
-    let reading = p.and_then(|p| {
-        visible
-            .iter()
-            .position(|c| c["url"] == p.chapter_url.as_str())
-    });
-    let progress_moved = old.is_none_or(|o| o.progress != Snapshot::of(s).progress);
+    let reading = p.and_then(|p| visible.iter().position(|c| c["url"] == p.chapter_url.as_str()));
+    let cur_progress = s.progress.as_ref().map(|p| (p.chapter_url.as_str(), p.page, p.at));
+    let progress_moved = old.is_none_or(|o| o.progress.as_ref().map(|p| (p.0.as_str(), p.1, p.2)) != cur_progress);
+    let mut chapter_order: HashMap<&str, usize> = HashMap::with_capacity(s.chapters.len());
+    for (idx, ch) in s.chapters.iter().enumerate() {
+        if let Some(u) = ch["url"].as_str() {
+            chapter_order.entry(u).or_insert(idx);
+        }
+    }
     for (i, c) in visible.iter().enumerate() {
         let url = c["url"].as_str().unwrap_or("");
         let current = progress_moved && Some(i) == reading;
@@ -426,7 +451,7 @@ fn outgoing_since(s: &Series, old: Option<&Snapshot>, raw: Option<Raw>, now: i64
         if !send_read && bookmarked == was_marked && !send_page {
             continue;
         }
-        let order = s.chapters.iter().position(|x| x["url"] == url).unwrap_or(i);
+        let order = chapter_order.get(url).copied().unwrap_or(i);
         let mut ch = have.cloned().unwrap_or_else(|| new_chapter(c, order));
         if send_read {
             ch.set_int(C_READ, read[i] as i64);
@@ -556,10 +581,11 @@ fn incoming_from(
     if s.chapters.is_empty() {
         let mut list: Vec<&Msg> = raw.chapters.values().collect();
         list.sort_by_key(|c| c.int(C_ORDER));
-        s.chapters = list
-            .iter()
-            .map(|c| json!({ "url": c.str(C_URL), "name": c.str(C_NAME), "scanlator": c.str(C_SCANLATOR), "chapterNumber": c.f32(C_NUMBER), "dateUpload": c.int(C_UPLOAD) }))
-            .collect();
+        s.chapters = Arc::new(
+            list.iter()
+                .map(|c| json!({ "url": c.str(C_URL), "name": c.str(C_NAME), "scanlator": c.str(C_SCANLATOR), "chapterNumber": c.f32(C_NUMBER), "dateUpload": c.int(C_UPLOAD) }))
+                .collect(),
+        );
     }
     s.in_library = favorite;
     if favorite && s.added_at == 0 {
@@ -585,6 +611,12 @@ fn incoming_from(
     // Read flags and bookmarks from other devices. Absence never clears one, like the rest of sync.
     let visible = s.visible();
     let derived = s.read_flags(&visible);
+    let mut read_by_url: HashMap<&str, bool> = HashMap::with_capacity(visible.len());
+    for (i, v) in visible.iter().enumerate() {
+        if let Some(u) = v["url"].as_str() {
+            read_by_url.entry(u).or_insert(derived[i]);
+        }
+    }
     for c in m.all(M_CHAPTERS).filter_map(Msg::parse) {
         let url = c.str(C_URL);
         if c.bool(C_BOOKMARK) == Some(true) {
@@ -592,10 +624,7 @@ fn incoming_from(
         } else if c.bool(C_BOOKMARK) == Some(false) {
             s.bookmarks.remove(&url);
         }
-        let read_here = visible
-            .iter()
-            .position(|v| v["url"] == url.as_str())
-            .map(|i| derived[i]);
+        let read_here = read_by_url.get(url.as_str()).copied();
         match c.bool(C_READ) {
             Some(true) if read_here != Some(true) => {
                 s.marks.insert(url, true);
@@ -625,8 +654,7 @@ fn incoming_from(
     Some((ix, raw))
 }
 
-fn decode(bytes: Vec<u8>, cursor: i64, full_requested: bool) -> Result<Reply, String> {
-    let backup = Msg::parse(&gunzip(bytes)?).ok_or("The server's backup couldn't be read")?;
+fn reply_from(backup: &Msg, cursor: i64, full_requested: bool) -> Reply {
     let sources = backup.all(B_SOURCES).filter_map(Msg::parse).map(|s| ((s.int(2) as u64).to_string(), s.str(1))).collect();
     let mangas = backup.all(B_MANGA).filter_map(Msg::parse).collect();
     let categories = backup
@@ -635,7 +663,12 @@ fn decode(bytes: Vec<u8>, cursor: i64, full_requested: bool) -> Result<Reply, St
         .map(|c| crate::store::Category { name: c.str(CAT_NAME), order: c.int(CAT_ORDER), flags: c.int(CAT_FLAGS), uid: c.int(CAT_UID), version: c.int(CAT_VERSION) })
         .filter(|c| !c.name.is_empty())
         .collect();
-    Ok(Reply { mangas, categories, sources, cursor, full_requested })
+    Reply { mangas, categories, sources, cursor, full_requested }
+}
+
+fn decode(bytes: Vec<u8>, cursor: i64, full_requested: bool) -> Result<Reply, String> {
+    let backup = Msg::parse(&gunzip(bytes)?).ok_or("The server's backup couldn't be read")?;
+    Ok(reply_from(&backup, cursor, full_requested))
 }
 
 fn gunzip(b: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -764,12 +797,25 @@ async fn v1_pass(store: &Entity<Store>, cfg: &mut Config, cx: &mut gpui::AsyncAp
     // With changes to send, fetch the file itself.
     let etag = if dirty { String::new() } else { cfg.v1_etag.clone() };
     let c = cfg.clone();
-    let (bytes, tag) = match cx.background_executor().spawn(async move { v1_get(&c, &etag) }).await? {
-        V1Get::Got(b, t) => (b, t),
-        V1Get::Missing | V1Get::Unchanged => return Ok(0),
-    };
-    let remote = Msg::parse(&gunzip(bytes.clone())?).ok_or("The server's old library file couldn't be read")?;
-    let reply = decode(bytes.clone(), 0, false)?;
+    enum V1Parsed {
+        Skip,
+        Got { bytes: Vec<u8>, tag: String, remote: Msg, reply: Reply },
+    }
+    let parsed = cx
+        .background_executor()
+        .spawn(async move {
+            match v1_get(&c, &etag)? {
+                V1Get::Got(bytes, tag) => {
+                    let raw = gunzip(bytes.clone())?;
+                    let remote = Msg::parse(&raw).ok_or("The server's old library file couldn't be read")?;
+                    let reply = reply_from(&remote, 0, false);
+                    Ok::<_, String>(V1Parsed::Got { bytes, tag, remote, reply })
+                }
+                V1Get::Missing | V1Get::Unchanged => Ok(V1Parsed::Skip),
+            }
+        })
+        .await?;
+    let V1Parsed::Got { bytes, tag, remote, reply } = parsed else { return Ok(0) };
     let taken = store.update(cx, |s, cx| s.apply_v1(&reply, cx));
     cfg.v1_etag = tag.clone();
     let (body, sent) = store.read_with(cx, |s, _| s.v1_outgoing(&remote));
@@ -779,10 +825,15 @@ async fn v1_pass(store: &Entity<Store>, cfg: &mut Config, cx: &mut gpui::AsyncAp
     }
     // The file is replaced whole, so keep the last one we saw.
     let kept = store.read_with(cx, |s, _| s.sync_dir().join("v1-before-upload.bin"));
-    let _ = std::fs::create_dir_all(kept.parent().unwrap_or(Path::new(".")));
-    let _ = std::fs::write(kept, &bytes);
     let c = cfg.clone();
-    let put = cx.background_executor().spawn(async move { v1_put(&c, &body, &tag) }).await?;
+    let put = cx
+        .background_executor()
+        .spawn(async move {
+            let _ = std::fs::create_dir_all(kept.parent().unwrap_or(Path::new(".")));
+            let _ = std::fs::write(kept, &bytes);
+            v1_put(&c, &body, &tag)
+        })
+        .await?;
     match put {
         Some(new_tag) => {
             cfg.v1_etag = new_tag.clone();
@@ -1130,7 +1181,7 @@ mod tests {
 
     fn series() -> Series {
         let mut s = Series::new("7537715367149829912".into(), "Comix".into(), json!({ "url": "/m", "title": "T" }));
-        s.chapters = (0..4).rev().map(|i| json!({ "url": format!("/c{i}"), "name": format!("Ch.{i}") })).collect();
+        s.chapters = Arc::new((0..4).rev().map(|i| json!({ "url": format!("/c{i}"), "name": format!("Ch.{i}") })).collect());
         s
     }
 

@@ -127,7 +127,9 @@ pub struct Library {
     /// Bumped whenever the store changes. Rebuilding the library clones every series and chapter, so that only
     /// happens when this or the filter, sort, category or page changes, not on every frame.
     data_gen: u64,
-    built: Option<(u64, bool, Option<i64>, Filter, Sort)>,
+    stats: Vec<crate::store::Stats>,
+    built_data: Option<(u64, bool)>,
+    built_view: Option<(Option<i64>, Filter, Sort)>,
     unread_total: usize,
     fresh_total: usize,
     _subs: Vec<Subscription>,
@@ -193,7 +195,9 @@ impl Library {
 shelf_shape: (false, false),
             undo_count: 0,
             data_gen: 0,
-            built: None,
+            stats: vec![],
+            built_data: None,
+            built_view: None,
             unread_total: 0,
             fresh_total: 0,
             _subs: subs,
@@ -229,7 +233,7 @@ shelf_shape: (false, false),
                             let known: std::collections::HashSet<String> = s.chapters.iter().filter_map(|c| c["url"].as_str().map(str::to_string)).collect();
                             // Only when the list was known before, or a first check would download everything.
                             let fresh = if auto && s.in_library && !known.is_empty() { chapters.iter().filter(|c| c["url"].as_str().is_some_and(|u| !known.contains(u))).cloned().collect() } else { vec![] };
-                            s.chapters = chapters;
+                            s.chapters = Arc::new(chapters);
                             // Within the scanlator filter, oldest first.
                             let visible = s.visible();
                             fresh.into_iter().filter(|c: &Value| visible.iter().any(|v| v["url"] == c["url"])).rev().collect::<Vec<Value>>()
@@ -262,7 +266,7 @@ shelf_shape: (false, false),
         if s.chapters.is_empty() || !source.installed {
             return cx.emit(OpenManga { source, manga: s.manga.clone() });
         }
-        cx.emit(Resume { source, manga: s.manga.clone(), chapters: Arc::new(s.chapters.clone()), index, page });
+        cx.emit(Resume { source, manga: s.manga.clone(), chapters: s.chapters.clone(), index, page });
     }
 
     fn open(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -613,7 +617,7 @@ shelf_shape: (false, false),
         let s = &self.series[i];
         let chapter = s.progress.as_ref().map_or_else(|| format!("{} chapters", s.chapters.len()), |p| p.chapter_name.clone());
         let when = s.progress.as_ref().map_or(String::new(), |p| ago(p.at, now_ms()));
-        let unread = s.unread();
+        let unread = self.stats[i].unread;
         let row = div()
             .id(("line", i))
             .px(u(6.))
@@ -653,9 +657,10 @@ shelf_shape: (false, false),
     fn card(&mut self, i: usize, cx: &mut Context<Self>) -> AnyElement {
         let image = self.cover_of(i, cx);
         let s = &self.series[i];
+        let st = self.stats[i];
         let title = s.title().to_string();
-        let sub = match s.unread() {
-            _ if s.caught_up() => format!("Caught up · {}", s.source_name),
+        let sub = match st.unread {
+            _ if st.caught_up => format!("Caught up · {}", s.source_name),
             0 => s.source_name.clone(),
             n => format!("{n} new · {}", s.source_name),
         };
@@ -666,7 +671,7 @@ shelf_shape: (false, false),
             .flex_col()
             .gap_2()
             .cursor_pointer()
-            .child(card_cover(cover(image, &title, self.card_w, self.card_w * CARD_H / CARD_W, s.unread()), s.read_fraction(), s.caught_up()))
+            .child(card_cover(cover(image, &title, self.card_w, self.card_w * CARD_H / CARD_W, st.unread), st.read_fraction, st.caught_up))
             .child(div().text_size(u(13.5)).font_weight(FontWeight::MEDIUM).truncate().child(title))
             .child(div().mt(u(-5.)).text_size(u(12.)).text_color(rgb(FAINT)).truncate().child(sub))
             .on_click(cx.listener(move |this, _, _, cx| this.open(i, cx)))
@@ -805,24 +810,26 @@ impl Render for Library {
         let width = crate::content_width(window);
         self.width = width;
         (self.cols, self.card_w) = grid(width, PAD, GAP, CARD_W);
-let undo_count = self.store.read(cx).history_undo().len();
+        let undo_count = self.store.read(cx).history_undo().len();
         self.undo_count = undo_count;
-        let key = (self.data_gen, self.updates_page, self.category, self.filter, self.sort);
-        if self.built != Some(key) {
+        let data_key = (self.data_gen, self.updates_page);
+        if self.built_data != Some(data_key) {
             let store = self.store.read(cx);
             let area = if self.updates_page { crate::store::Area::Updates } else { crate::store::Area::Library };
             self.series = store.library().into_iter().filter(|s| !store.hides_series(area, s)).cloned().map(|mut s| {
                 // Chapters after the scanlator filter. Not saved.
-                s.chapters = s.visible();
+                s.chapters = Arc::new(s.visible());
                 s.hidden_scanlators.clear();
+                s.scanlators_chosen = true;
                 s
             }).collect();
             self.library_len = self.series.len();
-            let unread: Vec<usize> = self.series.iter().map(Series::unread).collect();
-            self.unread_total = unread.iter().sum();
+            self.stats = self.series.iter().map(|s| s.stats_of(&s.chapters)).collect();
+            self.unread_total = self.stats.iter().map(|st| st.unread).sum();
             let reading: Vec<Series> = store.history().into_iter().filter(|s| !store.hides_series(crate::store::Area::History, s)).take(3).cloned().map(|mut s| {
-                s.chapters = s.visible();
+                s.chapters = Arc::new(s.visible());
                 s.hidden_scanlators.clear();
+                s.scanlators_chosen = true;
                 s
             }).collect();
 
@@ -830,48 +837,36 @@ let undo_count = self.store.read(cx).history_undo().len();
             if self.category.is_some_and(|o| !self.shelves.iter().any(|c| c.order == o)) {
                 self.category = None;
             }
-            let labels: Vec<String> = std::iter::once("All".to_string()).chain(self.shelves.iter().map(|c| c.name.clone())).collect();
-            let at = self.category.and_then(|o| self.shelves.iter().position(|c| c.order == o)).map_or(0, |p| p + 1);
-            self.shelf_switch.set(&labels.iter().map(String::as_str).collect::<Vec<_>>(), at);
-            let mut shown: Vec<usize> = (0..self.library_len)
-                .filter(|&i| self.category.is_none_or(|o| self.series[i].categories.contains(&o)))
-                .filter(|&i| match self.filter {
-                    Filter::All => true,
-                    Filter::New => unread[i] > 0,
-                    Filter::Done => self.series[i].caught_up(),
-                })
-                .collect();
-            match self.sort {
-                Sort::LastRead => {}
-                Sort::MostNew => shown.sort_by_key(|&i| std::cmp::Reverse(unread[i])),
-                Sort::Title => shown.sort_by_cached_key(|&i| self.series[i].title().to_lowercase()),
-            }
-            self.shown = shown;
-
-            let mut updates: Vec<(usize, usize, i64)> = self
-                .series
-                .iter()
-                .enumerate()
-                .flat_map(|(si, s)| {
-                    s.chapters.iter().take(UPDATES).enumerate().filter_map(move |(ci, c)| Some((si, ci, c["dateUpload"].as_i64().filter(|d| *d > 0)?)))
-                })
-                .collect();
-            updates.sort_by_key(|u| -u.2);
-            let updates: Vec<(usize, usize, i64)> = updates.into_iter().take(UPDATES).collect();
-            self.updates = updates.iter().map(|&(s, c, _)| (s, c)).collect();
-            self.fresh_total = if self.updates_page { self.updates.iter().filter(|(si, ci)| !self.series[*si].read_flags(&self.series[*si].chapters)[*ci]).count() } else { 0 };
-            // UTC days. Switch to local time if sources start giving hours.
-            let mut drops: Vec<Drop> = vec![];
-            for (si, ci, at) in updates {
-                let day = crate::manga::ymd(at);
-                match drops.iter_mut().find(|d| d.day == day && d.series == si) {
-                    Some(d) => d.chapters.push(ci),
-                    None => drops.push(Drop { at, day, series: si, chapters: vec![ci] }),
+            if self.updates_page {
+                let mut updates: Vec<(usize, usize, i64)> = self
+                    .series
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(si, s)| {
+                        s.chapters.iter().take(UPDATES).enumerate().filter_map(move |(ci, c)| Some((si, ci, c["dateUpload"].as_i64().filter(|d| *d > 0)?)))
+                    })
+                    .collect();
+                updates.sort_by_key(|u| -u.2);
+                let updates: Vec<(usize, usize, i64)> = updates.into_iter().take(UPDATES).collect();
+                self.updates = updates.iter().map(|&(s, c, _)| (s, c)).collect();
+                self.fresh_total = self.updates.iter().filter(|(si, ci)| !self.series[*si].read_flags(&self.series[*si].chapters)[*ci]).count();
+                // UTC days. Switch to local time if sources start giving hours.
+                let mut drops: Vec<Drop> = vec![];
+                for (si, ci, at) in updates {
+                    let day = crate::manga::ymd(at);
+                    match drops.iter_mut().find(|d| d.day == day && d.series == si) {
+                        Some(d) => d.chapters.push(ci),
+                        None => drops.push(Drop { at, day, series: si, chapters: vec![ci] }),
+                    }
                 }
+                // Chapter lists run newest first, so this puts each day's newest chapter on top.
+                drops.iter_mut().for_each(|d| d.chapters.sort());
+                self.drops = drops;
+            } else {
+                self.updates.clear();
+                self.drops.clear();
+                self.fresh_total = 0;
             }
-            // Chapter lists run newest first, so this puts each day's newest chapter on top.
-            drops.iter_mut().for_each(|d| d.chapters.sort());
-            self.drops = drops;
             // Something read from Browse without saving still belongs on the shelf.
             self.shelf = reading
                 .into_iter()
@@ -884,7 +879,29 @@ let undo_count = self.store.read(cx).history_undo().len();
                 })
                 .collect();
 
-            self.built = Some((self.data_gen, self.updates_page, self.category, self.filter, self.sort));
+            self.built_data = Some(data_key);
+            self.built_view = None;
+        }
+        let view_key = (self.category, self.filter, self.sort);
+        if self.built_view != Some(view_key) {
+            let labels: Vec<String> = std::iter::once("All".to_string()).chain(self.shelves.iter().map(|c| c.name.clone())).collect();
+            let at = self.category.and_then(|o| self.shelves.iter().position(|c| c.order == o)).map_or(0, |p| p + 1);
+            self.shelf_switch.set(&labels.iter().map(String::as_str).collect::<Vec<_>>(), at);
+            let mut shown: Vec<usize> = (0..self.library_len)
+                .filter(|&i| self.category.is_none_or(|o| self.series[i].categories.contains(&o)))
+                .filter(|&i| match self.filter {
+                    Filter::All => true,
+                    Filter::New => self.stats[i].unread > 0,
+                    Filter::Done => self.stats[i].caught_up,
+                })
+                .collect();
+            match self.sort {
+                Sort::LastRead => {}
+                Sort::MostNew => shown.sort_by_key(|&i| std::cmp::Reverse(self.stats[i].unread)),
+                Sort::Title => shown.sort_by_cached_key(|&i| self.series[i].title().to_lowercase()),
+            }
+            self.shown = shown;
+            self.built_view = Some(view_key);
         }
 
         let mut items = vec![Item::Heading];

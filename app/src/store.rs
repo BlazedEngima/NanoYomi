@@ -4,7 +4,28 @@ use gpui::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
+
+mod arc_vec {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::Arc;
+
+    pub fn serialize<S: Serializer, T: Serialize>(v: &Arc<Vec<T>>, s: S) -> Result<S::Ok, S::Error> {
+        v.as_slice().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Arc<Vec<T>>, D::Error> {
+        Vec::<T>::deserialize(d).map(Arc::new)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Stats {
+    pub unread: usize,
+    pub caught_up: bool,
+    pub read_fraction: Option<f32>,
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Series {
@@ -13,7 +34,8 @@ pub struct Series {
     pub manga: Value,
     pub in_library: bool,
     pub added_at: i64,
-    pub chapters: Vec<Value>,
+    #[serde(with = "arc_vec")]
+    pub chapters: Arc<Vec<Value>>,
     pub progress: Option<Progress>,
     /// Hidden scanlators (or languages, on multi-language sources).
     #[serde(default)]
@@ -97,7 +119,7 @@ impl Series {
             manga,
             in_library: false,
             added_at: 0,
-            chapters: vec![],
+            chapters: Arc::default(),
             progress: None,
             hidden_scanlators: vec![],
             scanlators_chosen: false,
@@ -146,7 +168,8 @@ impl Series {
         self.visible().iter().position(|c| c["url"] == p.chapter_url.as_str())
     }
 
-    /// How far through the series you are, from 0 to 1. The current chapter counts by page.
+    /// How far through the series you are, from 0 to 1. The current chapter counts by page. Kept to check `stats_of` against.
+    #[cfg(test)]
     pub fn read_fraction(&self) -> Option<f32> {
         let p = self.progress.as_ref()?;
         let list = self.visible();
@@ -186,6 +209,7 @@ impl Series {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn caught_up(&self) -> bool {
         let list = self.visible();
         (self.progress.is_some() || !self.marks.is_empty()) && !list.is_empty() && self.read_flags(&list).iter().all(|r| *r)
@@ -193,6 +217,29 @@ impl Series {
 
     pub fn unread(&self) -> usize {
         self.new_flags(&self.visible()).iter().filter(|n| **n).count()
+    }
+
+    /// Single-pass unread, caught-up, and progress fraction over an already-filtered slice.
+    pub fn stats_of(&self, list: &[Value]) -> Stats {
+        let mark = |c: &Value| self.marks.get(c["url"].as_str().unwrap_or_default()).copied();
+        let latest_read = list.iter().position(|c| mark(c) == Some(true));
+        let (mut read_count, mut unread) = (0usize, 0usize);
+        for (i, c) in list.iter().enumerate() {
+            match mark(c) {
+                Some(true) => read_count += 1,
+                Some(false) => unread += 1,
+                None => unread += latest_read.is_some_and(|r| i < r) as usize,
+            }
+        }
+        let caught_up = (self.progress.is_some() || !self.marks.is_empty()) && !list.is_empty() && read_count == list.len();
+        let read_fraction = self.progress.as_ref().filter(|_| !list.is_empty()).map(|p| {
+            let partial = match list.iter().position(|c| c["url"] == p.chapter_url.as_str()) {
+                Some(i) if mark(&list[i]) != Some(true) && p.pages > 0 => ((p.page + 1) as f32 / p.pages as f32).min(1.),
+                _ => 0.,
+            };
+            ((read_count as f32 + partial) / list.len() as f32).min(1.)
+        });
+        Stats { unread, caught_up, read_fraction }
     }
 
     /// Marks chapters read or unread by hand.
@@ -211,7 +258,7 @@ impl Series {
         let Some(p) = &self.progress else { return };
         let mut list = self.visible();
         if !list.iter().any(|c| c["url"] == p.chapter_url.as_str()) {
-            list = self.chapters.clone();
+            list = self.chapters.to_vec();
         }
         let Some(r) = list.iter().position(|c| c["url"] == p.chapter_url.as_str()) else { return };
         let finished = p.pages > 0 && p.page + 1 >= p.pages;
@@ -228,7 +275,7 @@ impl Series {
     pub fn read_number(&self) -> f32 {
         let mut list = self.visible();
         if self.progress.as_ref().is_some_and(|p| !list.iter().any(|c| c["url"] == p.chapter_url.as_str())) {
-            list = self.chapters.clone();
+            list = (*self.chapters).clone();
         }
         let flags = self.read_flags(&list);
         let read: Vec<&Value> = list.iter().zip(flags).filter(|(_, r)| *r).map(|(c, _)| c).collect();
@@ -281,7 +328,7 @@ pub fn visible_chapters(chapters: &[Value], hidden: &[String]) -> Vec<Value> {
 }
 
 /// Plain settings with no side effects, changed through `edit_prefs`.
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Prefs {
     /// Unset means sized for this machine.
     #[serde(default)]
@@ -383,7 +430,7 @@ impl Nsfw {
     }
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 struct Data {
     series: Vec<Series>,
     #[serde(default)]
@@ -428,6 +475,7 @@ pub struct Store {
     history_undo_gen: u64,
     data: Data,
     saving: bool,
+    dirty: bool,
     pub sync_status: SyncStatus,
     /// The last tracker update that failed, shown on the series page.
     pub track_error: Option<String>,
@@ -460,6 +508,7 @@ impl Store {
             path,
             data,
             saving: false,
+            dirty: false,
             sync_status: SyncStatus::Idle,
             track_error: None,
             update: None,
@@ -920,21 +969,46 @@ impl Store {
     }
 
     fn save_soon(&mut self, cx: &mut Context<Self>) {
+        self.dirty = true;
         if self.saving {
             return;
         }
         self.saving = true;
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(1)).await;
-            let Ok((path, bytes)) = this.update(cx, |s, _| {
-                s.saving = false;
-                (s.path.clone(), serde_json::to_vec(&s.data).unwrap_or_default())
-            }) else {
-                return;
-            };
-            let tmp = path.with_extension("tmp");
-            if let Err(e) = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &path)) {
-                eprintln!("save {}: {e}", path.display());
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let Ok(Some((path, snapshot))) = this.update(cx, |s, _| {
+                    if !s.dirty {
+                        s.saving = false;
+                        return None;
+                    }
+                    s.dirty = false;
+                    Some((s.path.clone(), s.data.clone()))
+                }) else {
+                    return;
+                };
+                cx.background_executor()
+                    .spawn(async move {
+                        let bytes = serde_json::to_vec(&snapshot).unwrap_or_default();
+                        let tmp = path.with_extension("tmp");
+                        if let Err(e) = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &path)) {
+                            eprintln!("save {}: {e}", path.display());
+                        }
+                    })
+                    .await;
+                let more = this
+                    .update(cx, |s, _| {
+                        if s.dirty {
+                            true
+                        } else {
+                            s.saving = false;
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if !more {
+                    break;
+                }
             }
         })
         .detach();
@@ -1066,11 +1140,11 @@ mod tests {
     #[test]
     fn read_number_survives_unnumbered_and_hidden_chapters() {
         let mut s = Series::new("1".into(), "S".into(), json!({ "url": "/m" }));
-        s.chapters = (0..5).rev().map(|i| json!({ "url": format!("/c{i}"), "chapterNumber": -1.0 })).collect();
+        s.chapters = Arc::new((0..5).rev().map(|i| json!({ "url": format!("/c{i}"), "chapterNumber": -1.0 })).collect());
         s.mark(&["/c0".into(), "/c1".into()], true);
         s.progress = Some(Progress { chapter_url: "/c2".into(), chapter_name: "".into(), page: 0, pages: 2, at: 0 });
         assert_eq!(s.read_number(), 2.);
-        s.chapters[3] = json!({ "url": "/c1", "chapterNumber": -1.0, "name": "Chapter 7" });
+        Arc::make_mut(&mut s.chapters)[3] = json!({ "url": "/c1", "chapterNumber": -1.0, "name": "Chapter 7" });
         assert_eq!(s.read_number(), 7.);
         s.marks.clear();
         s.progress = Some(Progress { chapter_url: "/gone".into(), chapter_name: "Ch. 9".into(), page: 1, pages: 2, at: 0 });
@@ -1081,7 +1155,7 @@ mod tests {
     fn unread_counts_chapters_newer_than_the_latest_read() {
         let mut s = Series::new("1".into(), "S".into(), json!({ "url": "/m" }));
         s.in_library = true;
-        s.chapters = (0..5).rev().map(|i| json!({ "url": format!("/c{i}") })).collect();
+        s.chapters = Arc::new((0..5).rev().map(|i| json!({ "url": format!("/c{i}") })).collect());
         assert_eq!(s.unread(), 0);
         s.mark(&["/c1".into()], true);
         s.progress = Some(Progress { chapter_url: "/c1".into(), chapter_name: "".into(), page: 0, pages: 2, at: 0 });
@@ -1140,7 +1214,7 @@ mod tests {
     #[test]
     fn marks_determine_read_state_independently_of_progress() {
         let mut s = Series::new("1".into(), "S".into(), json!({ "url": "/m" }));
-        s.chapters = (0..5).rev().map(|i| json!({ "url": format!("/c{i}") })).collect();
+        s.chapters = Arc::new((0..5).rev().map(|i| json!({ "url": format!("/c{i}") })).collect());
         s.mark(&["/c1".into(), "/c0".into()], true);
         s.progress = Some(Progress { chapter_url: "/c2".into(), chapter_name: "".into(), page: 0, pages: 4, at: 0 });
         assert_eq!(s.read_flags(&s.chapters), [false, false, false, true, true]); // c4 c3 c2 c1 c0
@@ -1163,7 +1237,7 @@ mod tests {
     fn chapters_are_marked_independently() {
         let mut s = Series::new("1".into(), "S".into(), json!({ "url": "/m" }));
         s.in_library = true;
-        s.chapters = (1..=10).rev().map(|i| json!({ "url": format!("/c{i}"), "chapterNumber": i as f64 })).collect();
+        s.chapters = Arc::new((1..=10).rev().map(|i| json!({ "url": format!("/c{i}"), "chapterNumber": i as f64 })).collect());
 
         // Jumping to chapter 10 and finishing it marks only chapter 10 read.
         s.mark(&["/c10".into()], true);
@@ -1224,6 +1298,45 @@ mod tests {
             vec!["B".to_string(), "Unknown".to_string()]
         );
         assert!(default_hidden(&[], None).is_empty());
+    }
+
+    #[test]
+    fn stats_of_matches_individual_methods() {
+        let mut s = Series::new("1".into(), "S".into(), json!({ "url": "/m" }));
+        let assert_parity = |s: &Series| {
+            let mut copy = s.clone();
+            copy.chapters = Arc::new(s.visible());
+            copy.hidden_scanlators.clear();
+            copy.scanlators_chosen = true;
+            assert_eq!(
+                copy.stats_of(&copy.chapters),
+                Stats { unread: copy.unread(), caught_up: copy.caught_up(), read_fraction: copy.read_fraction() }
+            );
+        };
+        assert_parity(&s);
+        s.chapters = Arc::new((0..5).rev().map(|i| json!({ "url": format!("/c{i}") })).collect());
+        s.scanlators_chosen = true;
+        assert_parity(&s);
+        s.progress = Some(Progress { chapter_url: "/c2".into(), chapter_name: "".into(), page: 0, pages: 4, at: 0 });
+        assert_parity(&s);
+        s.mark(&["/c4".into(), "/c3".into()], true);
+        s.mark(&["/c0".into()], false);
+        assert_parity(&s);
+        s.mark(&["/c2".into(), "/c0".into()], true);
+        assert_parity(&s);
+        s.progress = Some(Progress { chapter_url: "/c4".into(), chapter_name: "".into(), page: 1, pages: 2, at: 0 });
+        s.marks.clear();
+        assert_parity(&s);
+    }
+
+    #[test]
+    fn arc_vec_json_round_trip() {
+        let mut s = Series::new("1".into(), "S".into(), json!({ "url": "/m" }));
+        s.chapters = Arc::new(vec![json!({ "url": "/c1", "memo": { "k": "v" } })]);
+        let encoded = serde_json::to_string(&s).unwrap();
+        assert!(encoded.contains(r#""chapters":[{"#));
+        let decoded: Series = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.chapters.as_ref(), s.chapters.as_ref());
     }
 
     #[test]
