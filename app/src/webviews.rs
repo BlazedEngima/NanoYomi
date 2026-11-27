@@ -120,6 +120,8 @@ impl Render for WebViewHost {
 
 pub fn start(cx: &mut App, host: Arc<Host>) {
     let Some(mut requests) = host.take_webview_requests() else { return };
+    #[cfg(target_os = "linux")]
+    native::start(cx);
     cx.spawn(async move |cx| {
         let mut window: Option<WindowHandle<WebViewHost>> = None;
         while let Some(msg) = requests.next().await {
@@ -200,6 +202,11 @@ impl WebViewHost {
     }
 
     fn hide_window(&self, _window: &mut Window) {
+        #[cfg(target_os = "linux")]
+        for wv in self.views.values() {
+            native::hide_window(wv);
+        }
+        #[cfg(not(target_os = "linux"))]
         if let Some(wv) = self.views.values().next() {
             native::hide_window(wv);
         }
@@ -254,6 +261,10 @@ impl WebViewHost {
         }
         if op == "destroy" {
             native::cleanup(view);
+            #[cfg(target_os = "linux")]
+            if let Some(wv) = self.views.get(&view) {
+                native::close(wv);
+            }
             self.views.remove(&view); // dropping it detaches the view, and WebKit's process exits when idle
             if self.presented == Some(view) {
                 self.presented = None;
@@ -281,6 +292,11 @@ impl WebViewHost {
             }
             window.set_window_title("Verify to continue");
             native::show_window(wv);
+            #[cfg(target_os = "linux")]
+            {
+                let host = self.host.clone();
+                native::present(wv, "Verify to continue", move || host.notify(&json!({ "wvEvent": "presentClosed", "view": view })));
+            }
             window.activate_window();
             self.presented = Some(view);
             return false;
@@ -357,6 +373,8 @@ impl WebViewHost {
                 native::touch(wv, msg["action"].as_i64().unwrap_or(-1), x, y);
             }
             "resize" => {
+                #[cfg(target_os = "linux")]
+                native::resize(wv, msg["width"].as_f64().unwrap_or(411.), msg["height"].as_f64().unwrap_or(891.));
                 let _ = wv.set_bounds(rect(msg["width"].as_f64().unwrap_or(411.), msg["height"].as_f64().unwrap_or(891.)));
             }
             "stop" => native::stop(wv),
@@ -369,10 +387,10 @@ impl WebViewHost {
         native::add_script(wv, js);
     }
 
-    fn build(&self, view: i64, width: f64, height: f64, window: &mut Window) -> wry::Result<wry::WebView> {
+    fn build(&self, view: i64, width: f64, height: f64, _window: &mut Window) -> wry::Result<wry::WebView> {
         let ipc_host = self.host.clone();
         let load_host = self.host.clone();
-        let wv = builder()
+        let b = builder()
             .with_bounds(rect(width, height))
             .with_initialization_script_for_main_only(BOOTSTRAP, false)
             .with_ipc_handler(move |req| {
@@ -393,8 +411,12 @@ impl WebViewHost {
                 };
                 debug("wv<", &format!("{kind} {view} {url}"));
                 load_host.notify(&json!({ "wvEvent": kind, "view": view, "url": url }));
-            })
-            .build_as_child(window)?;
+            });
+        // WebKitGTK can't be a child of gpui's window, so Linux gives each view its own GTK window.
+        #[cfg(target_os = "linux")]
+        let wv = native::build(b, width, height)?;
+        #[cfg(not(target_os = "linux"))]
+        let wv = b.build_as_child(_window)?;
         native::keep_running_hidden(&wv);
         native::prepare_image_blocker();
         Ok(wv)
@@ -734,40 +756,191 @@ pub(crate) mod native {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(target_os = "linux")]
 pub(crate) mod native {
-    use wry::WebView;
+    use gpui::App;
+    use gtk::prelude::*;
+    use std::cell::RefCell;
+    use webkit2gtk::{SettingsExt, URIResponseExt, UserContentInjectedFrames, UserContentManagerExt, UserScript, UserScriptInjectionTime, WebResourceExt, WebViewExt};
+    use wry::{WebView, WebViewBuilderExtUnix, WebViewExtUnix};
+
+    /// GTK has its own loop, so gpui's loop turns it.
+    // ponytail: polls every 16ms even when idle, drive it from GLib's fd if the wakeups matter.
+    pub fn start(cx: &mut App) {
+        if let Err(e) = gtk::init() {
+            eprintln!("gtk: {e}");
+            return;
+        }
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                while gtk::events_pending() {
+                    gtk::main_iteration_do(false);
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// An offscreen window counts as shown, so WebKit doesn't slow the page down.
+    pub fn build(b: wry::WebViewBuilder<'_>, width: f64, height: f64) -> wry::Result<WebView> {
+        let window = gtk::OffscreenWindow::new();
+        window.set_default_size(width as i32, height as i32);
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        window.add(&vbox);
+        window.show_all();
+        let wv = b.build_gtk(&vbox)?;
+        if std::env::var_os("NANO_WV_DEBUG").is_some() {
+            wv.webview().connect_resource_load_started(|_, resource, _| {
+                let uri = resource.uri().map(|u| u.to_string()).unwrap_or_default();
+                let u = uri.clone();
+                resource.connect_finished(move |r| {
+                    let res = r.response();
+                    let code = res.as_ref().map_or(0, |x| x.status_code());
+                    let head = |k: &str| res.as_ref().and_then(|x| x.http_headers()).and_then(|h| h.one(k)).map(|v| v.to_string()).unwrap_or_default();
+                    if code < 400 && !head("content-type").contains("text/html") && !u.contains("/api/") {
+                        return;
+                    }
+                    super::debug("wk", &format!("{code} {u} mitigated={} type={} server={}", head("cf-mitigated"), head("content-type"), head("server")));
+                });
+                resource.connect_failed(move |_, e| super::debug("wk", &format!("failed {uri}: {e}")));
+            });
+        }
+        Ok(wv)
+    }
+
+    fn window(wv: &WebView) -> Option<gtk::Window> {
+        wv.webview().toplevel()?.downcast().ok()
+    }
+
+    pub fn resize(wv: &WebView, width: f64, height: f64) {
+        if let Some(w) = window(wv) {
+            w.resize(width as i32, height as i32);
+        }
+    }
+
+    pub fn close(wv: &WebView) {
+        hide_window(wv);
+        if let Some(w) = window(wv) {
+            unsafe { w.destroy() };
+        }
+    }
 
     pub fn prepare_image_blocker() {}
 
-    pub fn set_images(_: i64, _: &WebView, _: bool) {}
+    pub fn set_images(_: i64, wv: &WebView, allow: bool) {
+        if let Some(s) = WebViewExt::settings(&wv.webview()) {
+            s.set_auto_load_images(allow);
+        }
+    }
 
     pub fn cleanup(_: i64) {}
 
-    // wry can't change the user agent after creation. Linux needs its own call.
-    pub fn set_user_agent(_: &WebView, _: &str) {}
+    /// The host claims Mac Safari by default, which Turnstile rejects next to Linux's real platform.
+    pub fn set_user_agent(wv: &WebView, agent: &str) {
+        if agent.contains("Macintosh") {
+            return;
+        }
+        if let Some(s) = WebViewExt::settings(&wv.webview()) {
+            s.set_user_agent((!agent.is_empty()).then_some(agent));
+        }
+    }
 
-    /// Without a base URL the page's origin differs, which is fine for simple pages.
-    pub fn load_html(wv: &WebView, html: &str, _base: &str) {
-        let _ = wv.load_html(html);
+    pub fn load_html(wv: &WebView, html: &str, base: &str) {
+        wv.webview().load_html(html, (!base.is_empty()).then_some(base));
     }
 
     pub fn stop(wv: &WebView) {
-        let _ = wv.evaluate_script("window.stop()");
+        wv.webview().stop_loading();
     }
 
-    pub fn hide_window(_: &WebView) {}
+    thread_local! {
+        /// Views on show: the view, its window, and the offscreen box it came from.
+        static SHOWN: RefCell<Vec<(gtk::Widget, gtk::Window, gtk::Box)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Moves the view into a real window for the user. Closing the window calls on_close, and the caller hides the view.
+    pub fn present(wv: &WebView, title: &str, on_close: impl Fn() + 'static) {
+        let widget: gtk::Widget = wv.webview().upcast();
+        if SHOWN.with(|s| s.borrow().iter().any(|e| e.0 == widget)) {
+            return;
+        }
+        let Some(home) = widget.parent().and_then(|p| p.downcast::<gtk::Box>().ok()) else { return };
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_title(title);
+        window.set_default_size(widget.allocated_width().max(1), widget.allocated_height().clamp(1, 800));
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        window.add(&vbox);
+        let _ = wv.reparent(&vbox);
+        window.connect_delete_event(move |_, _| {
+            on_close();
+            glib::Propagation::Stop
+        });
+        window.show_all();
+        window.present();
+        SHOWN.with(|s| s.borrow_mut().push((widget, window, home)));
+    }
+
+    /// Puts the view back offscreen if it's on show.
+    pub fn hide_window(wv: &WebView) {
+        let widget: gtk::Widget = wv.webview().upcast();
+        let entry = SHOWN.with(|s| {
+            let mut s = s.borrow_mut();
+            s.iter().position(|e| e.0 == widget).map(|i| s.remove(i))
+        });
+        if let Some((_, window, home)) = entry {
+            let _ = wv.reparent(&home);
+            unsafe { window.destroy() };
+        }
+    }
 
     pub fn show_window(_: &WebView) {}
 
     pub fn keep_running_hidden(_: &WebView) {}
 
-    /// Only the current page gets it, with no document-start injection yet.
+    /// Runs at the start of every page, in every frame.
     pub fn add_script(wv: &WebView, js: &str) {
-        let _ = wv.evaluate_script(js);
+        if let Some(m) = wv.webview().user_content_manager() {
+            m.add_script(&UserScript::new(js, UserContentInjectedFrames::AllFrames, UserScriptInjectionTime::Start, &[], &[]));
+        }
     }
 
-    pub fn touch(_: &WebView, _: i64, _: f64, _: f64) {}
+    /// action is 0 down, 1 up, 2 move. (x, y) are CSS pixels from the top-left. GDK events reach the page as trusted mouse events.
+    pub fn touch(wv: &WebView, action: i64, x: f64, y: f64) {
+        use glib::translate::{ToGlibPtr, ToGlibPtrMut};
+        let widget = wv.webview();
+        let Some(window) = widget.window() else { return };
+        let Some(pointer) = gtk::gdk::Display::default().and_then(|d| d.default_seat()).and_then(|s| s.pointer()) else { return };
+        // A down is preceded by a move, so the page has the pointer in place.
+        let steps: &[gtk::gdk::EventType] = match action {
+            0 => &[gtk::gdk::EventType::MotionNotify, gtk::gdk::EventType::ButtonPress],
+            1 => &[gtk::gdk::EventType::ButtonRelease],
+            2 => &[gtk::gdk::EventType::MotionNotify],
+            _ => return,
+        };
+        for kind in steps {
+            let mut event = gtk::gdk::Event::new(*kind);
+            let held = if action == 0 && *kind == gtk::gdk::EventType::MotionNotify { 0 } else { gtk::gdk::ModifierType::BUTTON1_MASK.bits() };
+            unsafe {
+                let raw: *mut gtk::gdk::ffi::GdkEvent = event.to_glib_none_mut().0;
+                // Button and motion events share their leading fields.
+                let e = raw as *mut gtk::gdk::ffi::GdkEventButton;
+                (*e).window = window.to_glib_full();
+                (*e).send_event = 1;
+                (*e).x = x;
+                (*e).y = y;
+                (*e).x_root = x;
+                (*e).y_root = y;
+                (*e).state = held;
+                if *kind != gtk::gdk::EventType::MotionNotify {
+                    (*e).button = 1;
+                }
+                gtk::gdk::ffi::gdk_event_set_device(raw, pointer.to_glib_none().0);
+                gtk::gdk::ffi::gdk_event_set_source_device(raw, pointer.to_glib_none().0);
+            }
+            widget.event(&event);
+        }
+    }
 }
 
 /// Every WebView Nano makes starts here. WebView2 refuses a second view whose browser options differ.
