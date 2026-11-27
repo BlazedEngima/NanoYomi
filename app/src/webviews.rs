@@ -22,7 +22,7 @@ const BOOTSTRAP: &str = r#"(() => {
   if (window !== window.top && !window.webkit) return;
   const post = (m) => { try { (window.webkit ? window.webkit.messageHandlers.ipc : window.ipc).postMessage(JSON.stringify(m)); } catch (e) {} };
   Object.defineProperty(window, '__yomiPost', { value: post });
-  // Android's shouldInterceptRequest. fetch() waits for the extension's answer, XMLHttpRequest is only reported.
+  // Android's shouldInterceptRequest. fetch() and async XMLHttpRequest wait for the extension's answer, sync XHR is only reported.
   const absolute = (url) => { try { return new URL(url, location.href).href; } catch (e) { return String(url); } };
   const pending = new Map();
   // Ids are unique across frames, so an answer can go to every frame.
@@ -54,8 +54,48 @@ const BOOTSTRAP: &str = r#"(() => {
       return new Response(decode(a), { status: a.status || 200, statusText: a.reason || 'OK', headers: a.headers || {} });
     });
   };
-  const open0 = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function (method, url) { try { post({ t: 'request', url: absolute(url), method: String(method || 'GET').toUpperCase(), main: false }); } catch (e) {} return open0.apply(this, arguments); };
+  const ask = (url, method) => {
+    const id = newId();
+    const answer = new Promise((resolve) => { pending.set(id, resolve); setTimeout(() => window.__yomiIntercepted(id, null), 60000); });
+    post({ t: 'request', id, url, method, main: false });
+    return answer;
+  };
+  const XHR = XMLHttpRequest.prototype, open0 = XHR.open, send0 = XHR.send, abort0 = XHR.abort;
+  const req = new WeakMap();
+  XHR.open = function (method, url, async) {
+    req.set(this, { url: absolute(url), method: String(method || 'GET').toUpperCase(), async: async !== false });
+    return open0.apply(this, arguments);
+  };
+  XHR.abort = function () { const r = req.get(this); if (r) r.aborted = true; return abort0.apply(this, arguments); };
+  // An answered request looks finished to the page, as when Android serves the extension's response.
+  const finish = (xhr, r, a) => {
+    const body = a.error ? new Uint8Array() : decode(a);
+    const text = new TextDecoder().decode(body);
+    const headers = a.headers || {};
+    const type = xhr.responseType;
+    let response = text;
+    if (type === 'json') { try { response = JSON.parse(text); } catch (e) { response = null; } }
+    else if (type === 'arraybuffer') response = body.buffer;
+    else if (type === 'blob') response = new Blob([body], { type: headers['Content-Type'] || headers['content-type'] || '' });
+    const fixed = { readyState: 4, status: a.error ? 0 : a.status || 200, statusText: a.error ? '' : a.reason || 'OK', responseURL: r.url, response, responseText: type === '' || type === 'text' ? text : '' };
+    for (const k in fixed) Object.defineProperty(xhr, k, { configurable: true, get: () => fixed[k] });
+    const lines = Object.keys(headers).map((k) => k.toLowerCase() + ': ' + headers[k]).join('\r\n');
+    xhr.getAllResponseHeaders = () => (a.error ? '' : lines);
+    xhr.getResponseHeader = (n) => { const k = Object.keys(headers).find((h) => h.toLowerCase() === String(n).toLowerCase()); return a.error || k === undefined ? null : String(headers[k]); };
+    for (const e of ['readystatechange', a.error ? 'error' : 'load', 'loadend']) xhr.dispatchEvent(new ProgressEvent(e));
+  };
+  XHR.send = function () {
+    const r = req.get(this), self = this, args = arguments;
+    if (!r || !r.async) {
+      if (r) post({ t: 'request', url: r.url, method: r.method, main: false });
+      return send0.apply(this, args);
+    }
+    ask(r.url, r.method).then((a) => {
+      if (r.aborted) return;
+      if (!a) return send0.apply(self, args);
+      finish(self, r, a);
+    });
+  };
   for (const level of ['log', 'info', 'warn', 'error', 'debug']) {
     const original = console[level];
     console[level] = function (...args) {
@@ -169,9 +209,7 @@ impl WebViewHost {
     }
 
     fn handle(&mut self, msg: Value, window: &mut Window) -> bool {
-        if std::env::var_os("NANO_WV_DEBUG").is_some() {
-            eprintln!("wv> {}", truncate(&msg.to_string(), 300));
-        }
+        debug("wv>", &msg.to_string());
         let view = msg["view"].as_i64().unwrap_or(-1);
         let s = |k: &str| msg[k].as_str().unwrap_or_default().to_string();
         let op = s("wv");
@@ -215,6 +253,7 @@ impl WebViewHost {
             return false;
         }
         if op == "destroy" {
+            native::cleanup(view);
             self.views.remove(&view); // dropping it detaches the view, and WebKit's process exits when idle
             if self.presented == Some(view) {
                 self.presented = None;
@@ -248,8 +287,12 @@ impl WebViewHost {
         }
         let Some(wv) = self.views.get(&view) else { return false };
         match op.as_str() {
-            // blockNetworkImage isn't applied yet. It needs a WKContentRuleList.
-            "settings" => native::set_user_agent(wv, &s("userAgent")),
+            "settings" => {
+                native::set_user_agent(wv, &s("userAgent"));
+                if let Some(allow_images) = msg["images"].as_bool() {
+                    native::set_images(view, wv, allow_images);
+                }
+            }
             "load" => {
                 let mut headers = wry::http::HeaderMap::new();
                 if let Some(map) = msg["headers"].as_object() {
@@ -340,9 +383,7 @@ impl WebViewHost {
                 }
                 m["wvEvent"] = kind.into();
                 m["view"] = view.into();
-                if std::env::var_os("NANO_WV_DEBUG").is_some() {
-                    eprintln!("wv< {}", truncate(&m.to_string(), 300));
-                }
+                debug("wv<", &m.to_string());
                 ipc_host.notify(&m);
             })
             .with_on_page_load_handler(move |event, url| {
@@ -350,13 +391,12 @@ impl WebViewHost {
                     wry::PageLoadEvent::Started => "pageStarted",
                     wry::PageLoadEvent::Finished => "pageFinished",
                 };
-                if std::env::var_os("NANO_WV_DEBUG").is_some() {
-                    eprintln!("wv< {kind} {view} {url}");
-                }
+                debug("wv<", &format!("{kind} {view} {url}"));
                 load_host.notify(&json!({ "wvEvent": kind, "view": view, "url": url }));
             })
             .build_as_child(window)?;
         native::keep_running_hidden(&wv);
+        native::prepare_image_blocker();
         Ok(wv)
     }
 }
@@ -365,10 +405,77 @@ impl WebViewHost {
 #[cfg(target_os = "macos")]
 pub(crate) mod native {
     use objc2::MainThreadOnly;
+    use objc2::rc::Retained;
     use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
-    use objc2_foundation::{NSPoint, NSString, NSURL};
-    use objc2_web_kit::{WKInactiveSchedulingPolicy, WKUserScript, WKUserScriptInjectionTime};
+    use objc2_foundation::{NSError, NSPoint, NSString, NSURL};
+    use objc2_web_kit::{
+        WKContentRuleList, WKContentRuleListStore, WKInactiveSchedulingPolicy, WKUserContentController,
+        WKUserScript, WKUserScriptInjectionTime,
+    };
+    use std::cell::{Cell, RefCell};
     use wry::{WebView, WebViewExtMacOS};
+
+    const BLOCK_IMAGES_JSON: &str =
+        r#"[{"trigger":{"url-filter":".*","resource-type":["image"]},"action":{"type":"block"}}]"#;
+
+    thread_local! {
+        static BLOCK_IMAGES_RULE: RefCell<Option<Retained<WKContentRuleList>>> = const { RefCell::new(None) };
+        static PENDING_CONTROLLERS: RefCell<Vec<Retained<WKUserContentController>>> = const { RefCell::new(Vec::new()) };
+        static COMPILING_RULE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub fn prepare_image_blocker() {
+        let already = BLOCK_IMAGES_RULE.with(|c| c.borrow().is_some()) || COMPILING_RULE.with(|c| c.get());
+        if already {
+            return;
+        }
+        let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+        let Some(store) = (unsafe { WKContentRuleListStore::defaultStore(mtm) }) else { return };
+        COMPILING_RULE.with(|c| c.set(true));
+        let block = block2::RcBlock::new(|list: *mut WKContentRuleList, _err: *mut NSError| {
+            COMPILING_RULE.with(|c| c.set(false));
+            if !list.is_null()
+                && let Some(rule) = unsafe { Retained::retain(list) }
+            {
+                BLOCK_IMAGES_RULE.with(|cell| *cell.borrow_mut() = Some(rule.clone()));
+                let waiting: Vec<_> = PENDING_CONTROLLERS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+                for ctrl in waiting {
+                    unsafe { ctrl.addContentRuleList(&rule) };
+                }
+            }
+        });
+        unsafe {
+            store.compileContentRuleListForIdentifier_encodedContentRuleList_completionHandler(
+                Some(&NSString::from_str("nano-block-images")),
+                Some(&NSString::from_str(BLOCK_IMAGES_JSON)),
+                Some(&*block),
+            );
+        }
+    }
+
+    pub fn set_images(_view: i64, wv: &WebView, allow_images: bool) {
+        let ctrl = wv.manager();
+        if allow_images {
+            PENDING_CONTROLLERS.with(|cell| {
+                cell.borrow_mut().retain(|c| !std::ptr::eq(Retained::as_ptr(c), Retained::as_ptr(&ctrl)));
+            });
+            unsafe { ctrl.removeAllContentRuleLists() };
+            return;
+        }
+        if let Some(rule) = BLOCK_IMAGES_RULE.with(|cell| cell.borrow().clone()) {
+            unsafe { ctrl.addContentRuleList(&rule) };
+            return;
+        }
+        PENDING_CONTROLLERS.with(|cell| {
+            let mut list = cell.borrow_mut();
+            if !list.iter().any(|c| std::ptr::eq(Retained::as_ptr(c), Retained::as_ptr(&ctrl))) {
+                list.push(ctrl);
+            }
+        });
+        prepare_image_blocker();
+    }
+
+    pub fn cleanup(_view: i64) {}
 
     pub fn set_user_agent(wv: &WebView, ua: &str) {
         unsafe { wv.webview().setCustomUserAgent(Some(&NSString::from_str(ua))) };
@@ -468,8 +575,9 @@ pub(crate) mod native {
 /// The WebView2 calls wry doesn't wrap.
 #[cfg(windows)]
 pub(crate) mod native {
-    use std::sync::Arc;
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, LazyLock, Mutex};
     use webview2_com::Microsoft::Web::WebView2::Win32::*;
     use webview2_com::{CallDevToolsProtocolMethodCompletedHandler, WebResourceRequestedEventHandler};
     use windows::Win32::Foundation::HWND;
@@ -477,6 +585,50 @@ pub(crate) mod native {
     use windows::Win32::UI::WindowsAndMessaging::*;
     use windows::core::{HSTRING, Interface, w};
     use wry::{WebView, WebViewExtWindows};
+
+    static BLOCK_IMAGES: LazyLock<Mutex<HashMap<i64, Arc<AtomicBool>>>> = LazyLock::new(Mutex::default);
+
+    /// Every handler on a view gets every request that matches any of its filters, so each one checks the kind it wants.
+    fn is_kind(args: &ICoreWebView2WebResourceRequestedEventArgs, kind: COREWEBVIEW2_WEB_RESOURCE_CONTEXT) -> bool {
+        let mut context = COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL;
+        unsafe { args.ResourceContext(&mut context) }.is_ok() && context == kind
+    }
+
+    pub fn prepare_image_blocker() {}
+
+    pub fn set_images(view: i64, wv: &WebView, allow_images: bool) {
+        let blocked = !allow_images;
+        if let Some(flag) = BLOCK_IMAGES.lock().unwrap().get(&view) {
+            flag.store(blocked, Ordering::Relaxed);
+            return;
+        }
+        if allow_images {
+            return;
+        }
+        let flag = Arc::new(AtomicBool::new(true));
+        BLOCK_IMAGES.lock().unwrap().insert(view, flag.clone());
+        let (webview, env) = (wv.webview(), wv.environment());
+        let handler = WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
+            let Some(args) = args else { return Ok(()) };
+            if !flag.load(Ordering::Relaxed) || !is_kind(&args, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_IMAGE) {
+                return Ok(());
+            }
+            unsafe {
+                let response = env.CreateWebResourceResponse(None, 204, w!("No Content"), w!(""))?;
+                args.SetResponse(&response)?;
+            }
+            Ok(())
+        }));
+        unsafe {
+            let mut token = Default::default();
+            let _ = webview.AddWebResourceRequestedFilter(w!("*"), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_IMAGE);
+            let _ = webview.add_WebResourceRequested(&handler, &mut token);
+        }
+    }
+
+    pub fn cleanup(view: i64) {
+        BLOCK_IMAGES.lock().unwrap().remove(&view);
+    }
 
     /// Chromium otherwise slows or pauses pages in a hidden or covered window.
     pub const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion \
@@ -502,7 +654,7 @@ pub(crate) mod native {
         // ponytail: each call leaves a spent handler behind; remove them by token if views ever load many documents.
         let handler = WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else { return Ok(()) };
-            if served.swap(true, Ordering::SeqCst) {
+            if !is_kind(&args, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT) || served.swap(true, Ordering::SeqCst) {
                 return Ok(());
             }
             unsafe {
@@ -586,6 +738,12 @@ pub(crate) mod native {
 pub(crate) mod native {
     use wry::WebView;
 
+    pub fn prepare_image_blocker() {}
+
+    pub fn set_images(_: i64, _: &WebView, _: bool) {}
+
+    pub fn cleanup(_: i64) {}
+
     // wry can't change the user agent after creation. Linux needs its own call.
     pub fn set_user_agent(_: &WebView, _: &str) {}
 
@@ -634,6 +792,15 @@ fn origin_check(rules: &[String]) -> String {
         })
         .collect();
     if checks.is_empty() { "false".into() } else { checks.join(" || ") }
+}
+
+/// With NANO_WV_DEBUG set, logs a message with seconds since the first one, to see gaps between requests.
+fn debug(dir: &str, text: &str) {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    if std::env::var_os("NANO_WV_DEBUG").is_some() {
+        let t = START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64();
+        eprintln!("[{t:9.3}] {dir} {}", truncate(text, 300));
+    }
 }
 
 fn truncate(s: &str, n: usize) -> &str {
