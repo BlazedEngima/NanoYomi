@@ -3,9 +3,11 @@
 use gpui::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+mod db;
 
 mod arc_vec {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -432,6 +434,7 @@ impl Nsfw {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct Data {
+    #[serde(default)]
     series: Vec<Series>,
     #[serde(default)]
     languages: std::collections::HashMap<String, Vec<String>>,
@@ -472,6 +475,7 @@ pub enum SyncStatus {
 
 pub struct Store {
     path: PathBuf,
+    db: Arc<Mutex<db::Db>>,
     history_undo_gen: u64,
     data: Data,
     saving: bool,
@@ -491,21 +495,62 @@ pub fn now_ms() -> i64 {
 }
 
 impl Store {
+    /// First launch on SQLite: builds the database from the old library.json, then sets that file aside.
+    fn move_from_json(path: &Path, db_path: &Path, db: &mut db::Db) -> Data {
+        let Some(mut data) = std::fs::read(path).ok().and_then(|b| {
+            serde_json::from_slice::<Data>(&b)
+                .map_err(|e| eprintln!("{}: {e}", path.display()))
+                .ok()
+        }) else {
+            return Data::default();
+        };
+        for s in &mut data.series {
+            s.migrate_read_marks();
+        }
+        // Built beside the real file and moved in once complete, so a crash can't leave half a library.
+        let staging = db_path.with_extension("db.new");
+        let _ = std::fs::remove_file(&staging);
+        let built = {
+            let mut tmp = db::Db::new(staging.clone());
+            tmp.save(data.clone())
+        };
+        if let Err(e) = built {
+            eprintln!("{}: {e}", staging.display());
+            return data;
+        }
+        if std::fs::rename(&staging, db_path).is_err() {
+            return data;
+        }
+        match db.load() {
+            Ok(Some(stored)) => {
+                let _ = std::fs::rename(path, path.with_extension("json.pre-sqlite"));
+                stored
+            }
+            _ => data,
+        }
+    }
+
     pub fn load(path: PathBuf) -> Self {
-        let mut data: Data = std::fs::read(&path)
-            .ok()
-            .and_then(|b| {
-                serde_json::from_slice(&b)
-                    .map_err(|e| eprintln!("{}: {e}", path.display()))
-                    .ok()
-            })
-            .unwrap_or_default();
+        let db_path = path.with_extension("db");
+        let mut db = db::Db::new(db_path.clone());
+        let mut data: Data = match db.load() {
+            Ok(Some(data)) => data,
+            Ok(None) => Self::move_from_json(&path, &db_path, &mut db),
+            Err(e) => {
+                eprintln!("{}: {e}", db_path.display());
+                // The unreadable file is kept aside, and the library is rebuilt from library.json if it is still there.
+                let _ = std::fs::rename(&db_path, db_path.with_extension("db.broken"));
+                db = db::Db::new(db_path.clone());
+                Self::move_from_json(&path, &db_path, &mut db)
+            }
+        };
         for s in &mut data.series {
             s.migrate_read_marks();
         }
         Store {
             history_undo_gen: 0,
             path,
+            db: Arc::new(Mutex::new(db)),
             data,
             saving: false,
             dirty: false,
@@ -977,22 +1022,21 @@ impl Store {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                let Ok(Some((path, snapshot))) = this.update(cx, |s, _| {
+                let Ok(Some((db, snapshot))) = this.update(cx, |s, _| {
                     if !s.dirty {
                         s.saving = false;
                         return None;
                     }
                     s.dirty = false;
-                    Some((s.path.clone(), s.data.clone()))
+                    Some((s.db.clone(), s.data.clone()))
                 }) else {
                     return;
                 };
                 cx.background_executor()
                     .spawn(async move {
-                        let bytes = serde_json::to_vec(&snapshot).unwrap_or_default();
-                        let tmp = path.with_extension("tmp");
-                        if let Err(e) = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &path)) {
-                            eprintln!("save {}: {e}", path.display());
+                        let mut db = db.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Err(e) = db.save(snapshot) {
+                            eprintln!("save: {e}");
                         }
                     })
                     .await;
@@ -1427,4 +1471,80 @@ fn prefs_read_from_old_files() {
             .unwrap()
             .contains(r#""vertical_reader":true"#)
     );
+}
+
+#[cfg(test)]
+#[test]
+fn the_old_json_library_moves_into_sqlite_once() {
+    let dir = std::env::temp_dir().join(format!("nano-move-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let json = dir.join("library.json");
+    let mut s = Series::new("1".into(), "S".into(), serde_json::json!({ "url": "/m", "title": "T" }));
+    s.in_library = true;
+    s.chapters = Arc::new(vec![serde_json::json!({ "url": "/c1" })]);
+    let data = Data { series: vec![s], ..Default::default() };
+    std::fs::write(&json, serde_json::to_vec(&data).unwrap()).unwrap();
+
+    let store = Store::load(json.clone());
+    assert_eq!(store.all_series().len(), 1);
+    assert!(dir.join("library.db").exists());
+    assert!(!json.exists() && dir.join("library.json.pre-sqlite").exists());
+
+    let again = Store::load(json);
+    assert_eq!(again.all_series()[0].chapters.len(), 1);
+    assert!(again.all_series()[0].in_library);
+}
+
+#[cfg(test)]
+#[test]
+#[ignore]
+fn sqlite_matches_json_on_a_real_library() {
+    use std::time::Instant;
+    let src: PathBuf = std::env::var_os("NANO_BENCH_FILE").expect("set NANO_BENCH_FILE").into();
+    let dir = std::env::temp_dir().join(format!("nano-real-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let json = dir.join("library.json");
+    std::fs::copy(&src, &json).unwrap();
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+
+    let t = Instant::now();
+    let mut expected: Data = serde_json::from_slice(&std::fs::read(&json).unwrap()).unwrap();
+    for s in &mut expected.series {
+        s.migrate_read_marks();
+    }
+    println!("BENCH json_load_ms {:.1}", ms(t));
+    let want = serde_json::to_value(&expected.series).unwrap();
+
+    let t = Instant::now();
+    let first = Store::load(json.clone());
+    println!("BENCH migrate_ms {:.1}", ms(t));
+    assert_eq!(serde_json::to_value(first.all_series()).unwrap(), want, "migrated library differs");
+    drop(first);
+
+    let t = Instant::now();
+    let second = Store::load(json.clone());
+    println!("BENCH sqlite_load_ms {:.1}", ms(t));
+    assert_eq!(serde_json::to_value(second.all_series()).unwrap(), want, "reloaded library differs");
+    drop(second);
+
+    let json_bytes = std::fs::metadata(dir.join("library.json.pre-sqlite")).unwrap().len();
+    let db_bytes = std::fs::metadata(dir.join("library.db")).unwrap().len();
+    println!("BENCH json_bytes {json_bytes} db_bytes {db_bytes}");
+
+    // Reading on in one series, saved the old way and the new way.
+    let mut db = db::Db::new(dir.join("library.db"));
+    let mut data = db.load().unwrap().unwrap();
+    let p = data.series.iter().position(|s| s.progress.is_some()).unwrap_or(0);
+    data.series[p].progress = Some(Progress { chapter_url: "/x".into(), chapter_name: "x".into(), page: 7, pages: 9, at: 1 });
+    let t = Instant::now();
+    let rows = db.save(data.clone()).unwrap();
+    println!("BENCH sqlite_one_change_save_ms {:.2} rows {rows}", ms(t));
+    let t = Instant::now();
+    let rows = db.save(data.clone()).unwrap();
+    println!("BENCH sqlite_no_change_save_ms {:.2} rows {rows}", ms(t));
+    let t = Instant::now();
+    std::fs::write(dir.join("old.json"), serde_json::to_vec(&data).unwrap()).unwrap();
+    println!("BENCH json_save_ms {:.2}", ms(t));
 }
