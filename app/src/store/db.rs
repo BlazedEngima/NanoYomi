@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
@@ -43,6 +43,21 @@ fn keys(series: &[Series]) -> Vec<String> {
             if *n == 1 { base } else { format!("{base}\u{1}{n}") }
         })
         .collect()
+}
+
+/// Copies the library to `to` as a consistent snapshot, replacing the last one only once the new one checks out.
+pub fn backup(from: &Path, to: &Path) -> Res<()> {
+    let tmp = to.with_extension("bak.new");
+    let _ = std::fs::remove_file(&tmp);
+    Connection::open(from)?.execute("VACUUM INTO ?1", params![tmp.to_string_lossy()])?;
+    let verdict: String = Connection::open(&tmp)?.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+    if verdict != "ok" {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("the copy failed its check: {verdict}").into());
+    }
+    let _ = std::fs::remove_file(to);
+    std::fs::rename(&tmp, to)?;
+    Ok(())
 }
 
 impl Db {
@@ -298,6 +313,22 @@ mod tests {
         let back = Db::new(path).load().unwrap().unwrap();
         assert_eq!(back.series[0].url(), "/b");
         assert_eq!(back.series[1].url(), "/a");
+    }
+
+    #[test]
+    fn a_backup_reads_back_the_same_and_replaces_the_last_one() {
+        let d = dir("backup");
+        let (path, copy) = (d.join("library.db"), d.join("library.db.bak"));
+        let mut db = Db::new(path.clone());
+        let mut data = data();
+        db.save(data.clone()).unwrap();
+        backup(&path, &copy).unwrap();
+        data.zoom = Some(3.0);
+        db.save(data.clone()).unwrap();
+        backup(&path, &copy).unwrap();
+        let back = Db::new(copy).load().unwrap().unwrap();
+        assert_eq!(json_of(&back), json_of(&data));
+        assert!(!d.join("library.db.bak.new").exists());
     }
 
     #[test]
