@@ -38,6 +38,9 @@ pub struct Series {
     /// Tracker entries, as Mihon's backup keeps them.
     #[serde(default)]
     pub tracks: Vec<Track>,
+    //
+    #[serde(default)]
+    pub independent_chapters: bool,
     /// Timestamp of the last explicit history clear, so sync does not resurrect older progress.
     #[serde(default)]
     pub history_cleared_at: i64,
@@ -104,6 +107,7 @@ impl Series {
             bookmarks: Default::default(),
             categories: vec![],
             tracks: vec![],
+            independent_chapters: true,
             history_cleared_at: 0,
         }
     }
@@ -145,35 +149,39 @@ impl Series {
     /// How far through the series you are, from 0 to 1. The current chapter counts by page.
     pub fn read_fraction(&self) -> Option<f32> {
         let p = self.progress.as_ref()?;
-        let total = self.visible().len();
-        let i = self.reading_index()?;
-        let page = if p.pages == 0 { 0. } else { ((p.page + 1) as f32 / p.pages as f32).min(1.) };
-        Some(((total - i - 1) as f32 + page) / total as f32)
+        let list = self.visible();
+        let total = list.len();
+        if total == 0 {
+            return None;
+        }
+        let flags = self.read_flags(&list);
+        let read_count = flags.iter().filter(|r| **r).count() as f32;
+        let current_partial = match list.iter().position(|c| c["url"] == p.chapter_url.as_str()) {
+            Some(i) if !flags[i] && p.pages > 0 => ((p.page + 1) as f32 / p.pages as f32).min(1.),
+            _ => 0.,
+        };
+        Some(((read_count + current_partial) / total as f32).min(1.))
     }
 
     /// Whether each chapter in `list` (newest first) is read: older than the one being read, finished, or marked by hand.
     pub fn read_flags(&self, list: &[Value]) -> Vec<bool> {
-        let p = self.progress.as_ref();
-        let reading = p.and_then(|p| list.iter().position(|c| c["url"] == p.chapter_url.as_str()));
-        let finished = p.is_some_and(|p| p.pages > 0 && p.page + 1 >= p.pages);
         list.iter()
-            .enumerate()
-            .map(|(i, c)| match self.marks.get(c["url"].as_str().unwrap_or_default()) {
-                Some(read) => *read,
-                None => reading.is_some_and(|r| i > r || (i == r && finished)),
-            })
+            .map(|c| self.marks.get(c["url"].as_str().unwrap_or_default()) == Some(&true))
             .collect()
     }
-
     /// Whether each chapter counts as new: newer than the one being read, or marked unread.
     /// An unstarted series has nothing new, so its whole list isn't a backlog.
+    /// Whether each chapter counts as new: explicitly marked unread, or unread and newer than the latest read chapter.
+    /// An unstarted series without manual unread marks has nothing new, so its whole list isn't a backlog.
     pub fn new_flags(&self, list: &[Value]) -> Vec<bool> {
-        let reading = self.progress.as_ref().and_then(|p| list.iter().position(|c| c["url"] == p.chapter_url.as_str()));
+        let flags = self.read_flags(list);
+        let latest_read = flags.iter().position(|r| *r);
         list.iter()
             .enumerate()
-            .map(|(i, c)| match self.marks.get(c["url"].as_str().unwrap_or_default()) {
-                Some(read) => !read,
-                None => reading.is_some_and(|r| i < r),
+            .map(|(i, c)| {
+                let url = c["url"].as_str().unwrap_or_default();
+                self.marks.get(url) == Some(&false)
+                    || latest_read.is_some_and(|r| i < r && !flags[i])
             })
             .collect()
     }
@@ -191,6 +199,28 @@ impl Series {
     pub fn mark(&mut self, urls: &[String], read: bool) {
         for url in urls {
             self.marks.insert(url.clone(), read);
+        }
+    }
+
+    /// Migrates legacy linear `progress` into explicit per-chapter `marks` once.
+    pub fn migrate_read_marks(&mut self) {
+        if self.independent_chapters {
+            return;
+        }
+        self.independent_chapters = true;
+        let Some(p) = &self.progress else { return };
+        let mut list = self.visible();
+        if !list.iter().any(|c| c["url"] == p.chapter_url.as_str()) {
+            list = self.chapters.clone();
+        }
+        let Some(r) = list.iter().position(|c| c["url"] == p.chapter_url.as_str()) else { return };
+        let finished = p.pages > 0 && p.page + 1 >= p.pages;
+        for (i, c) in list.iter().enumerate() {
+            if i > r || (i == r && finished) {
+                if let Some(url) = c["url"].as_str().filter(|u| !u.is_empty()) {
+                    self.marks.entry(url.to_string()).or_insert(true);
+                }
+            }
         }
     }
 
@@ -414,7 +444,7 @@ pub fn now_ms() -> i64 {
 
 impl Store {
     pub fn load(path: PathBuf) -> Self {
-        let data = std::fs::read(&path)
+        let mut data: Data = std::fs::read(&path)
             .ok()
             .and_then(|b| {
                 serde_json::from_slice(&b)
@@ -422,6 +452,9 @@ impl Store {
                     .ok()
             })
             .unwrap_or_default();
+        for s in &mut data.series {
+            s.migrate_read_marks();
+        }
         Store {
             history_undo_gen: 0,
             path,
@@ -1034,25 +1067,28 @@ mod tests {
     fn read_number_survives_unnumbered_and_hidden_chapters() {
         let mut s = Series::new("1".into(), "S".into(), json!({ "url": "/m" }));
         s.chapters = (0..5).rev().map(|i| json!({ "url": format!("/c{i}"), "chapterNumber": -1.0 })).collect();
+        s.mark(&["/c0".into(), "/c1".into()], true);
         s.progress = Some(Progress { chapter_url: "/c2".into(), chapter_name: "".into(), page: 0, pages: 2, at: 0 });
         assert_eq!(s.read_number(), 2.);
         s.chapters[3] = json!({ "url": "/c1", "chapterNumber": -1.0, "name": "Chapter 7" });
         assert_eq!(s.read_number(), 7.);
+        s.marks.clear();
         s.progress = Some(Progress { chapter_url: "/gone".into(), chapter_name: "Ch. 9".into(), page: 1, pages: 2, at: 0 });
         assert_eq!(s.read_number(), 9.);
     }
 
     #[test]
-    fn unread_counts_chapters_newer_than_the_one_being_read() {
+    fn unread_counts_chapters_newer_than_the_latest_read() {
         let mut s = Series::new("1".into(), "S".into(), json!({ "url": "/m" }));
         s.in_library = true;
         s.chapters = (0..5).rev().map(|i| json!({ "url": format!("/c{i}") })).collect();
         assert_eq!(s.unread(), 0);
-        s.progress = Some(Progress { chapter_url: "/c1".into(), chapter_name: "".into(), page: 0, pages: 1, at: 0 });
-        assert_eq!(s.unread(), 3); // c4, c3, c2
+        s.mark(&["/c1".into()], true);
         s.progress = Some(Progress { chapter_url: "/c1".into(), chapter_name: "".into(), page: 0, pages: 2, at: 0 });
-        assert_eq!(s.read_fraction(), Some(0.3));
+        assert_eq!(s.unread(), 3); // c4, c3, c2
+        assert_eq!(s.read_fraction(), Some(0.2));
         assert!(!s.caught_up());
+        s.mark(&["/c0".into(), "/c2".into(), "/c3".into(), "/c4".into()], true);
         s.progress = Some(Progress { chapter_url: "/c4".into(), chapter_name: "".into(), page: 1, pages: 2, at: 0 });
         assert!(s.caught_up());
     }
@@ -1102,21 +1138,13 @@ mod tests {
     }
 
     #[test]
-    fn marks_override_what_progress_implies() {
+    fn marks_determine_read_state_independently_of_progress() {
         let mut s = Series::new("1".into(), "S".into(), json!({ "url": "/m" }));
-        s.chapters = (0..5)
-            .rev()
-            .map(|i| json!({ "url": format!("/c{i}") }))
-            .collect();
-        s.progress = Some(Progress {
-            chapter_url: "/c2".into(),
-            chapter_name: "".into(),
-            page: 0,
-            pages: 4,
-            at: 0,
-        });
+        s.chapters = (0..5).rev().map(|i| json!({ "url": format!("/c{i}") })).collect();
+        s.mark(&["/c1".into(), "/c0".into()], true);
+        s.progress = Some(Progress { chapter_url: "/c2".into(), chapter_name: "".into(), page: 0, pages: 4, at: 0 });
         assert_eq!(s.read_flags(&s.chapters), [false, false, false, true, true]); // c4 c3 c2 c1 c0
-        assert_eq!(s.unread(), 2);
+        assert_eq!(s.unread(), 3);
         s.mark(&["/c4".into(), "/c3".into()], true);
         s.mark(&["/c0".into()], false);
         assert_eq!(s.read_flags(&s.chapters), [true, true, false, true, false]);
@@ -1129,6 +1157,58 @@ mod tests {
         assert!(s.bookmarks.contains("/c3"));
         s.toggle_bookmark("/c3");
         assert!(s.bookmarks.is_empty());
+    }
+
+    #[test]
+    fn chapters_are_marked_independently() {
+        let mut s = Series::new("1".into(), "S".into(), json!({ "url": "/m" }));
+        s.in_library = true;
+        s.chapters = (1..=10).rev().map(|i| json!({ "url": format!("/c{i}"), "chapterNumber": i as f64 })).collect();
+
+        // Jumping to chapter 10 and finishing it marks only chapter 10 read.
+        s.mark(&["/c10".into()], true);
+        s.progress = Some(Progress { chapter_url: "/c10".into(), chapter_name: "Ch. 10".into(), page: 9, pages: 10, at: 100 });
+        assert!(s.read_flags(&s.chapters)[0]);
+        assert!(s.read_flags(&s.chapters)[1..].iter().all(|r| !*r));
+        assert_eq!(s.unread(), 0);
+        assert!(!s.caught_up());
+
+        // Going back to chapter 5 and finishing it marks chapter 5 without clearing chapter 10.
+        s.mark(&["/c5".into()], true);
+        s.progress = Some(Progress { chapter_url: "/c5".into(), chapter_name: "Ch. 5".into(), page: 7, pages: 8, at: 200 });
+        assert_eq!(s.marks.get("/c10"), Some(&true));
+        assert_eq!(s.marks.get("/c5"), Some(&true));
+        assert_eq!(s.marks.get("/c4"), None);
+        assert_eq!(s.read_number(), 10.);
+        assert_eq!(s.read_fraction(), Some(0.2));
+    }
+
+    #[test]
+    fn legacy_progress_migrates_once_to_independent_marks() {
+        let mut s: Series = serde_json::from_value(json!({
+            "source": "1",
+            "source_name": "S",
+            "manga": { "url": "/m" },
+            "in_library": true,
+            "added_at": 0,
+            "chapters": (0..5).rev().map(|i| json!({ "url": format!("/c{i}") })).collect::<Vec<_>>(),
+            "progress": { "chapter_url": "/c2", "chapter_name": "", "page": 1, "pages": 2, "at": 100 },
+            "marks": { "/c0": false }
+        }))
+        .unwrap();
+        assert!(!s.independent_chapters);
+        s.migrate_read_marks();
+        assert!(s.independent_chapters);
+        assert_eq!(s.marks.get("/c2"), Some(&true));
+        assert_eq!(s.marks.get("/c1"), Some(&true));
+        assert_eq!(s.marks.get("/c0"), Some(&false));
+        assert_eq!(s.marks.get("/c3"), None);
+        assert_eq!(s.marks.get("/c4"), None);
+
+        // Second call does not re-migrate if user later marks c1 unread.
+        s.mark(&["/c1".into()], false);
+        s.migrate_read_marks();
+        assert_eq!(s.marks.get("/c1"), Some(&false));
     }
 
     #[test]
